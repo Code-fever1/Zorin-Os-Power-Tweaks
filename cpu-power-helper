@@ -1,0 +1,194 @@
+#!/bin/bash
+# Privileged operations for CPU Power — only whitelisted commands.
+set -euo pipefail
+
+AUTO_CPUFREQ="/usr/local/bin/auto-cpufreq"
+[[ -x "$AUTO_CPUFREQ" ]] || AUTO_CPUFREQ="/usr/bin/auto-cpufreq"
+CONF="/etc/auto-cpufreq.conf"
+BAT="/sys/class/power_supply/BAT1/charge_control_end_threshold"
+
+usage() {
+  echo "Usage: $0 auto-cpufreq --force=...|--turbo=...|..." >&2
+  echo "       $0 set-charge PERCENT" >&2
+  echo "       $0 write-config TMPFILE" >&2
+  echo "       $0 set-swappiness VALUE" >&2
+  echo "       $0 write-zramswap TMPFILE" >&2
+  echo "       $0 zramswap-boot enable|disable" >&2
+  echo "       $0 samsung-mode MODE" >&2
+  echo "       $0 install-daemon" >&2
+  exit 1
+}
+
+[[ $# -ge 1 ]] || usage
+
+case "$1" in
+  auto-cpufreq)
+    shift
+    [[ $# -ge 1 ]] || usage
+    allowed=0
+    for arg in "$@"; do
+      case "$arg" in
+        --force=reset|--force=powersave|--force=performance)
+          allowed=1
+          ;;
+        --turbo=auto|--turbo=never|--turbo=always)
+          allowed=1
+          ;;
+        --install)
+          allowed=1
+          ;;
+        *)
+          echo "Rejected argument: $arg" >&2
+          exit 1
+          ;;
+      esac
+    done
+    [[ "$allowed" -eq 1 ]] || usage
+    exec "$AUTO_CPUFREQ" "$@"
+    ;;
+  set-charge)
+    [[ $# -eq 2 ]] || usage
+    pct="$2"
+    [[ "$pct" =~ ^[0-9]+$ ]] || exit 1
+    (( pct >= 50 && pct <= 100 )) || exit 1
+    [[ -f "$BAT" ]] || { echo "No charge limit control on this device." >&2; exit 1; }
+    echo "$pct" >"$BAT"
+    ;;
+  write-config)
+    [[ $# -eq 2 && -f "$2" ]] || usage
+    tmp="$2"
+    grep -q '^\[charger\]' "$tmp" && grep -q '^\[battery\]' "$tmp" || exit 1
+    cp "$tmp" "$CONF"
+    systemctl restart auto-cpufreq.service 2>/dev/null || true
+    ;;
+  set-swappiness)
+    [[ $# -eq 2 ]] || usage
+    val="$2"
+    [[ "$val" =~ ^[0-9]+$ ]] || exit 1
+    (( val >= 0 && val <= 200 )) || exit 1
+    echo "$val" > /proc/sys/vm/swappiness
+    printf 'vm.swappiness=%s\n' "$val" > /etc/sysctl.d/99-zorin-cpu-power-swappiness.conf
+    ;;
+  write-zramswap)
+    [[ $# -eq 2 && -f "$2" ]] || usage
+    tmp="$2"
+    grep -qE '^ALGO=[a-z0-9_-]+$' "$tmp" || exit 1
+    grep -qE '^PERCENT=[0-9]+$' "$tmp" || exit 1
+    grep -qE '^PRIORITY=-?[0-9]+$' "$tmp" || exit 1
+    cp "$tmp" /etc/default/zramswap
+    systemctl restart zramswap.service
+    ;;
+  zramswap-boot)
+    [[ $# -eq 2 ]] || usage
+    case "$2" in
+      enable)
+        systemctl enable zramswap.service
+        systemctl start zramswap.service
+        ;;
+      disable)
+        systemctl stop zramswap.service
+        systemctl disable zramswap.service
+        ;;
+      *)
+        exit 1
+        ;;
+    esac
+    ;;
+  install-daemon)
+    managed="/opt/auto-cpufreq/current/share/scripts/auto-cpufreq.service"
+    unit="/etc/systemd/system/auto-cpufreq.service"
+    # Older installs point ExecStart at /opt/auto-cpufreq/venv, which this
+    # package no longer ships. --install refuses to replace that unit, so the
+    # service stays failed with "not running in daemon mode".
+    if [[ -f "$managed" && -f "$unit" ]]; then
+      execstart="$(awk -F= '/^ExecStart=/{print $2; exit}' "$unit" | awk '{print $1}')"
+      if [[ -n "$execstart" && ! -x "$execstart" ]]; then
+        cp "$managed" "$unit"
+      fi
+    elif [[ -f "$managed" && ! -e "$unit" ]]; then
+      cp "$managed" "$unit"
+    fi
+    "$AUTO_CPUFREQ" --install || true
+    systemctl daemon-reload
+    systemctl reset-failed auto-cpufreq.service || true
+    systemctl enable auto-cpufreq.service
+    systemctl restart auto-cpufreq.service
+    systemctl is-active --quiet auto-cpufreq.service
+    echo "auto-cpufreq daemon is running."
+    ;;
+  samsung-mode)
+    [[ $# -ge 2 ]] || usage
+    profile="/sys/firmware/acpi/platform_profile"
+    [[ -f "$profile" ]] || { echo "This laptop has no Samsung performance mode." >&2; exit 1; }
+    set_profile() {
+      case "$1" in
+        low-power|quiet|balanced|performance) ;;
+        *) echo "Rejected platform profile: $1" >&2; exit 1 ;;
+      esac
+      echo "$1" >"$profile"
+    }
+    case "$2" in
+      silent)
+        set_profile low-power
+        "$AUTO_CPUFREQ" --force=powersave || true
+        "$AUTO_CPUFREQ" --turbo=never || true
+        ;;
+      quiet)
+        set_profile quiet
+        "$AUTO_CPUFREQ" --force=powersave || true
+        "$AUTO_CPUFREQ" --turbo=auto || true
+        ;;
+      balance)
+        set_profile balanced
+        "$AUTO_CPUFREQ" --force=reset || true
+        "$AUTO_CPUFREQ" --turbo=auto || true
+        ;;
+      power)
+        set_profile performance
+        "$AUTO_CPUFREQ" --force=performance || true
+        "$AUTO_CPUFREQ" --turbo=always || true
+        ;;
+      adaptive)
+        "$AUTO_CPUFREQ" --force=reset || true
+        "$AUTO_CPUFREQ" --turbo=auto || true
+        ;;
+      platform)
+        [[ $# -eq 3 ]] || usage
+        set_profile "$3"
+        ;;
+      apply)
+        [[ $# -eq 4 ]] || usage
+        set_profile "$3"
+        case "$4" in
+          silent)
+            "$AUTO_CPUFREQ" --force=powersave || true
+            "$AUTO_CPUFREQ" --turbo=never || true
+            ;;
+          quiet)
+            "$AUTO_CPUFREQ" --force=powersave || true
+            "$AUTO_CPUFREQ" --turbo=auto || true
+            ;;
+          balance)
+            "$AUTO_CPUFREQ" --force=reset || true
+            "$AUTO_CPUFREQ" --turbo=auto || true
+            ;;
+          power)
+            "$AUTO_CPUFREQ" --force=performance || true
+            "$AUTO_CPUFREQ" --turbo=always || true
+            ;;
+          *)
+            echo "Rejected apply kind: $4" >&2
+            exit 1
+            ;;
+        esac
+        ;;
+      *)
+        echo "Rejected mode: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  *)
+    usage
+    ;;
+esac
