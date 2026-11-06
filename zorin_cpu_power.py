@@ -48,12 +48,12 @@ SMOOTH_BRIGHTNESS_DEFAULTS = {
 }
 BATTERY_ICON_FILE = Path.home() / ".config/zorin-cpu-power/battery-icon.json"
 BATTERY_ICON_MODES = (
-    ("adaptive", "Adaptive", "#C084FC"),
     ("silent", "Silent", "#2DBA6E"),
     ("quiet", "Quiet", "#1FA7A0"),
     ("balance", "Balance", "#7EB8FF"),
     ("power", "Power", "#3484E4"),
 )
+TURBO_PERCENT = ("turbo", "Turbo", "#FFBE6F")
 KBD_TIMEOUTS = (
     (0, "Always on"),
     (10, "10 sec"),
@@ -1465,10 +1465,21 @@ def write_samsung_mode(mode: str) -> None:
 
 
 def default_battery_icon() -> dict:
-    return {
+    settings = {
         key: {"enabled": True, "color": color}
         for key, _label, color in BATTERY_ICON_MODES
     }
+    turbo_key, _label, turbo_color = TURBO_PERCENT
+    settings[turbo_key] = {"enabled": True, "color": turbo_color}
+    return settings
+
+
+def _battery_color_item(raw: dict, key: str, fallback: str) -> tuple[str, bool]:
+    item = raw.get(key)
+    if not isinstance(item, dict):
+        return fallback, True
+    chosen = str(item.get("color") or fallback).strip() or fallback
+    return chosen, bool(item.get("enabled", True))
 
 
 def load_battery_icon() -> dict:
@@ -1480,20 +1491,26 @@ def load_battery_icon() -> dict:
     if not isinstance(raw, dict):
         return settings
     for key, _label, color in BATTERY_ICON_MODES:
-        item = raw.get(key)
-        if not isinstance(item, dict):
-            continue
-        chosen = str(item.get("color") or color).strip()
-        if chosen:
-            settings[key]["color"] = chosen
-        settings[key]["enabled"] = bool(item.get("enabled", True))
+        chosen, enabled = _battery_color_item(raw, key, color)
+        settings[key]["color"] = chosen
+        settings[key]["enabled"] = enabled
+    turbo_key, _label, turbo_color = TURBO_PERCENT
+    if isinstance(raw.get(turbo_key), dict):
+        chosen, enabled = _battery_color_item(raw, turbo_key, turbo_color)
+    elif isinstance(raw.get("adaptive"), dict):
+        chosen, enabled = _battery_color_item(raw, "adaptive", turbo_color)
+        enabled = True
+    else:
+        chosen, enabled = turbo_color, True
+    settings[turbo_key]["color"] = chosen
+    settings[turbo_key]["enabled"] = enabled
     return settings
 
 
 def save_battery_icon(settings: dict) -> None:
     payload = {}
     defaults = default_battery_icon()
-    for key, _label, _color in BATTERY_ICON_MODES:
+    for key, _label, _color in (*BATTERY_ICON_MODES, TURBO_PERCENT):
         item = settings.get(key) if isinstance(settings.get(key), dict) else {}
         payload[key] = {
             "enabled": bool(item.get("enabled", defaults[key]["enabled"])),
@@ -1505,6 +1522,37 @@ def save_battery_icon(settings: dict) -> None:
 
 def rgba_to_hex(rgba: Gdk.RGBA) -> str:
     return f"#{int(round(rgba.red * 255)):02X}{int(round(rgba.green * 255)):02X}{int(round(rgba.blue * 255)):02X}"
+
+
+def hex_to_rgb(value: str) -> tuple[float, float, float] | None:
+    text = value.strip().lstrip("#")
+    if len(text) != 6:
+        return None
+    try:
+        return (
+            int(text[0:2], 16) / 255,
+            int(text[2:4], 16) / 255,
+            int(text[4:6], 16) / 255,
+        )
+    except ValueError:
+        return None
+
+
+def running_battery_mode() -> str:
+    """Mode whose color the battery should show. Adaptive follows the live firmware profile."""
+    mode = read_samsung_mode()
+    if mode != "adaptive":
+        return mode
+    platform_to_mode = {platform: name for name, platform in SAMSUNG_PLATFORM.items()}
+    return platform_to_mode.get(read_platform_profile(), "balance")
+
+
+def battery_profile_color() -> tuple[float, float, float] | None:
+    mode = running_battery_mode()
+    entry = load_battery_icon().get(mode) or {}
+    if not entry.get("enabled", True):
+        return None
+    return hex_to_rgb(str(entry.get("color") or ""))
 
 
 def read_platform_profile() -> str:
@@ -1752,15 +1800,15 @@ def format_profile_status(override: str | None = None, governor: str | None = No
 def format_turbo_status(override: str | None = None, turbo_live: bool | None = None) -> str:
     override = read_turbo_override() if override is None else override
     if override == "never":
-        return "Off"
+        return "off"
     if override == "always":
-        return "On"
+        return "always"
     turbo_live = read_turbo_live() if turbo_live is None else turbo_live
     if turbo_live is True:
-        return "Auto · On"
+        return "auto.on"
     if turbo_live is False:
-        return "Auto · Off"
-    return "Auto"
+        return "auto.off"
+    return "auto"
 
 
 def read_status_footer() -> dict[str, str]:
@@ -2131,14 +2179,22 @@ class BatteryIcon(Gtk.DrawingArea):
         self.shown = 0.0
         self.charging = False
         self.powersave = False
+        self.profile_color: tuple[float, float, float] | None = None
         self.phase = 0.0
         self.connect("draw", self._draw)
         GLib.timeout_add(33, self._animate)
 
-    def set_reading(self, percent: float | None, charging: bool, powersave: bool) -> None:
+    def set_reading(
+        self,
+        percent: float | None,
+        charging: bool,
+        powersave: bool,
+        profile_color: tuple[float, float, float] | None = None,
+    ) -> None:
         self.percent = 0.0 if percent is None else max(0.0, min(100.0, float(percent)))
         self.charging = charging
         self.powersave = powersave
+        self.profile_color = profile_color
 
     def _animate(self) -> bool:
         self.shown += (self.percent - self.shown) * 0.1
@@ -2152,6 +2208,8 @@ class BatteryIcon(Gtk.DrawingArea):
     def _fill_color(self) -> tuple[float, float, float]:
         if self.shown < 20:
             return (0.93, 0.27, 0.32)
+        if self.profile_color is not None:
+            return self.profile_color
         if self.powersave:
             return (0.96, 0.78, 0.22)
         return (0.20, 0.82, 0.48)
@@ -2213,16 +2271,21 @@ class BatteryIcon(Gtk.DrawingArea):
             cr.fill()
         cr.restore()
 
-        if self.charging:
-            self._bolt(cr, body_x + body_w / 2, body_y + body_h / 2, min(body_w, body_h) * 0.28)
-
         label = f"{self.shown:.0f}%"
         cr.set_source_rgb(1, 1, 1)
         cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
-        cr.set_font_size(max(16, body_w * 0.22))
+        font_size = max(16, body_w * 0.22)
+        cr.set_font_size(font_size)
         ext = cr.text_extents(label)
-        cr.move_to(body_x + (body_w - ext.width) / 2, body_y + body_h * 0.58)
+        baseline = body_y + body_h * 0.58
+        cr.move_to(body_x + (body_w - ext.width) / 2, baseline)
         cr.show_text(label)
+
+        if self.charging:
+            bolt = min(body_w, body_h) * 0.22
+            bolt_cy = baseline + font_size * 0.22 + bolt * 0.62
+            bolt_cy = min(bolt_cy, body_y + body_h - bolt * 0.62)
+            self._bolt(cr, body_x + body_w / 2, bolt_cy, bolt)
         return False
 
     def _bolt(self, cr, cx, cy, size) -> None:
@@ -3241,7 +3304,6 @@ class ControlWindow(Gtk.Window):
         ("Display · Beta", "display"),
         ("Keyboard", "keyboard"),
         ("Memory", "memory"),
-        ("Rules", "rules"),
         ("Scheduler", "scheduler"),
         ("Monitor", "monitor"),
         ("Settings", "settings"),
@@ -3372,7 +3434,6 @@ class ControlWindow(Gtk.Window):
         self._start_live_updates()
 
     def _on_delete_hide(self, *_args) -> bool:
-        self._stop_live_updates()
         self.hide()
         return True
 
@@ -3592,7 +3653,7 @@ class ControlWindow(Gtk.Window):
             ("Power", "profile", "power"),
             ("Turbo on", "turbo", "always"),
             ("Charge limit", "page", "battery"),
-            ("Auto rules", "page", "rules"),
+            ("Auto rules", "page", "cpu"),
         ):
             btn = Gtk.Button(label=label)
             btn.get_style_context().add_class("cpu-quick")
@@ -3640,23 +3701,64 @@ class ControlWindow(Gtk.Window):
         card.pack_start(Gtk.Label(label="Profile", halign=Gtk.Align.START), False, False, 0)
         card.pack_start(self.profile_tiles.box, False, False, 0)
         hint = Gtk.Label(
-            label="Adaptive lets auto-cpufreq follow the charger and battery rules. Power saver and Performance stay on until you pick Adaptive again.",
+            label="Adaptive follows the rules below. Silent, Quiet, Balance, and Power stay on until you pick Adaptive again.",
             wrap=True,
             halign=Gtk.Align.START,
         )
         hint.get_style_context().add_class("cpu-card-desc")
         card.pack_start(hint, False, False, 0)
-        card.pack_start(Gtk.Label(label="Turbo boost", halign=Gtk.Align.START), False, False, 0)
+        box.pack_start(card, False, False, 0)
+        box.pack_start(self._rules_card(), False, False, 0)
+        turbo = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        turbo.get_style_context().add_class("cpu-card")
+        turbo.set_border_width(14)
+        turbo.pack_start(Gtk.Label(label="Turbo boost", halign=Gtk.Align.START), False, False, 0)
         note = Gtk.Label(
             label="Auto keeps turbo on while the CPU is busy. It turns turbo off when the laptop is idle, and on AC power also when it is warm and idle (about 65–70°C).",
             wrap=True,
             halign=Gtk.Align.START,
         )
         note.get_style_context().add_class("cpu-card-desc")
-        card.pack_start(note, False, False, 0)
-        card.pack_start(self.turbo_choice.box, False, False, 0)
-        box.pack_start(card, False, False, 0)
+        turbo.pack_start(note, False, False, 0)
+        turbo.pack_start(self.turbo_choice.box, False, False, 0)
+        box.pack_start(turbo, False, False, 0)
         return outer
+
+    def _rules_card(self) -> Gtk.Box:
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        card.get_style_context().add_class("cpu-card")
+        card.set_border_width(14)
+        title = Gtk.Label(label="Adaptive rules", halign=Gtk.Align.START)
+        title.get_style_context().add_class("cpu-card-title")
+        card.pack_start(title, False, False, 0)
+        card.pack_start(
+            Gtk.Label(
+                label="Used while Adaptive is selected. Power save stays in Silent and Quiet. Adaptive can use all four modes.",
+                wrap=True,
+                halign=Gtk.Align.START,
+            ),
+            False,
+            False,
+            0,
+        )
+        self.rule_charger = self._rule_combo(self.power_rules["charger"], self._on_rules_changed)
+        self.rule_battery = self._rule_combo(self.power_rules["battery"], self._on_rules_changed)
+        for title_text, combo in (("On charger", self.rule_charger), ("On battery", self.rule_battery)):
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+            label = Gtk.Label(label=title_text, halign=Gtk.Align.START)
+            label.get_style_context().add_class("cpu-form-label")
+            row.pack_start(label, True, True, 0)
+            row.pack_start(combo, False, False, 0)
+            card.pack_start(row, False, False, 0)
+        note = Gtk.Label(
+            label="Force silent, Force quiet, Force balance, and Force power stay on that one mode. "
+            "Power save moves between Silent and Quiet. Adaptive moves among Silent, Quiet, Balance, and Power.",
+            wrap=True,
+            halign=Gtk.Align.START,
+        )
+        note.get_style_context().add_class("cpu-card-desc")
+        card.pack_start(note, False, False, 0)
+        return card
 
     def _page_battery(self) -> Gtk.Widget:
         outer, box = self._page_shell(
@@ -3719,7 +3821,7 @@ class ControlWindow(Gtk.Window):
         )
         card.pack_start(
             Gtk.Label(
-                label="The panel battery icon takes the color of the mode you are in. Turn a mode off to leave the icon at its normal color.",
+                label="Profiles color the battery tank. Turbo colors the percentage only while turbo is on, and lets it go when turbo turns off.",
                 wrap=True,
                 halign=Gtk.Align.START,
             ),
@@ -3736,7 +3838,7 @@ class ControlWindow(Gtk.Window):
             rgba.parse(settings[key]["color"])
             color = Gtk.ColorButton.new_with_rgba(rgba)
             color.set_use_alpha(False)
-            color.set_tooltip_text(f"{label} color")
+            color.set_tooltip_text(f"{label} tank color")
             color.set_sensitive(settings[key]["enabled"])
             color.connect("color-set", self._on_battery_icon_color, key)
             reset = Gtk.Button()
@@ -3746,7 +3848,7 @@ class ControlWindow(Gtk.Window):
             reset.connect("clicked", self._on_battery_icon_reset, key, default)
             switch = Gtk.Switch(valign=Gtk.Align.CENTER)
             switch.set_active(settings[key]["enabled"])
-            switch.set_tooltip_text(f"Color the icon in {label}")
+            switch.set_tooltip_text(f"Color the tank in {label}")
             switch.connect("notify::active", self._on_battery_icon_enabled, key)
             row.pack_start(name, True, True, 0)
             row.pack_start(color, False, False, 0)
@@ -3754,7 +3856,37 @@ class ControlWindow(Gtk.Window):
             row.pack_start(switch, False, False, 0)
             card.pack_start(row, False, False, 0)
             self._icon_color_rows[key] = (color, switch)
+        card.pack_start(self._turbo_percent_row(settings["turbo"]), False, False, 0)
         return card
+
+    def _turbo_percent_row(self, turbo: dict) -> Gtk.Box:
+        _key, label, default = TURBO_PERCENT
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        row.set_margin_top(6)
+        name = Gtk.Label(label=label, halign=Gtk.Align.START, hexpand=True)
+        rgba = Gdk.RGBA()
+        rgba.parse(str(turbo.get("color") or default))
+        color = Gtk.ColorButton.new_with_rgba(rgba)
+        color.set_use_alpha(False)
+        color.set_tooltip_text("Percentage color while turbo is on")
+        color.set_sensitive(bool(turbo.get("enabled", True)))
+        color.connect("color-set", self._on_turbo_percent_color)
+        reset = Gtk.Button()
+        reset.set_image(Gtk.Image.new_from_icon_name("view-refresh-symbolic", Gtk.IconSize.BUTTON))
+        reset.set_relief(Gtk.ReliefStyle.NONE)
+        reset.set_tooltip_text("Reset color")
+        reset.connect("clicked", self._on_turbo_percent_reset)
+        switch = Gtk.Switch(valign=Gtk.Align.CENTER)
+        switch.set_active(bool(turbo.get("enabled", True)))
+        switch.set_tooltip_text("Color the percentage while turbo is on")
+        switch.connect("notify::active", self._on_turbo_percent_enabled)
+        row.pack_start(name, True, True, 0)
+        row.pack_start(color, False, False, 0)
+        row.pack_start(reset, False, False, 0)
+        row.pack_start(switch, False, False, 0)
+        self._turbo_percent_color = color
+        self._turbo_percent_switch = switch
+        return row
 
     def _on_battery_icon_color(self, _button: Gtk.ColorButton, key: str) -> None:
         if self._updating:
@@ -3779,11 +3911,37 @@ class ControlWindow(Gtk.Window):
             self._updating = False
         self._save_battery_icon_rows()
 
+    def _on_turbo_percent_color(self, _button: Gtk.ColorButton) -> None:
+        if self._updating:
+            return
+        self._save_battery_icon_rows()
+
+    def _on_turbo_percent_enabled(self, switch: Gtk.Switch, _pspec) -> None:
+        if self._updating or not hasattr(self, "_turbo_percent_color"):
+            return
+        self._turbo_percent_color.set_sensitive(switch.get_active())
+        self._save_battery_icon_rows()
+
+    def _on_turbo_percent_reset(self, _button: Gtk.Button) -> None:
+        rgba = Gdk.RGBA()
+        rgba.parse(TURBO_PERCENT[2])
+        self._updating = True
+        try:
+            self._turbo_percent_color.set_rgba(rgba)
+        finally:
+            self._updating = False
+        self._save_battery_icon_rows()
+
     def _save_battery_icon_rows(self) -> None:
         settings = load_battery_icon()
         for key, (color, switch) in self._icon_color_rows.items():
             settings[key]["color"] = rgba_to_hex(color.get_rgba())
             settings[key]["enabled"] = switch.get_active()
+        if hasattr(self, "_turbo_percent_color"):
+            settings["turbo"] = {
+                "enabled": self._turbo_percent_switch.get_active(),
+                "color": rgba_to_hex(self._turbo_percent_color.get_rgba()),
+            }
         save_battery_icon(settings)
 
     def _page_display(self) -> Gtk.Widget:
@@ -4242,34 +4400,6 @@ class ControlWindow(Gtk.Window):
         combo.connect("changed", on_change)
         return combo
 
-    def _page_rules(self) -> Gtk.Widget:
-        outer, box = self._page_shell(
-            "Rules",
-            "Used while the CPU profile is Adaptive. Power save stays in Silent and Quiet. Adaptive can use all four Samsung modes.",
-        )
-        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        card.get_style_context().add_class("cpu-card")
-        card.set_border_width(14)
-        self.rule_charger = self._rule_combo(self.power_rules["charger"], self._on_rules_changed)
-        self.rule_battery = self._rule_combo(self.power_rules["battery"], self._on_rules_changed)
-        for title, combo in (("On charger", self.rule_charger), ("On battery", self.rule_battery)):
-            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-            label = Gtk.Label(label=title, halign=Gtk.Align.START)
-            label.get_style_context().add_class("cpu-form-label")
-            row.pack_start(label, True, True, 0)
-            row.pack_start(combo, False, False, 0)
-            card.pack_start(row, False, False, 0)
-        note = Gtk.Label(
-            label="Force silent, Force quiet, Force balance, and Force power stay on that one mode. "
-            "Power save moves between Silent and Quiet. Adaptive moves among Silent, Quiet, Balance, and Power.",
-            wrap=True,
-            halign=Gtk.Align.START,
-        )
-        note.get_style_context().add_class("cpu-card-desc")
-        card.pack_start(note, False, False, 0)
-        box.pack_start(card, False, False, 0)
-        return outer
-
     def _on_rules_changed(self, _widget) -> None:
         if self._updating or not hasattr(self, "rule_battery"):
             return
@@ -4279,12 +4409,14 @@ class ControlWindow(Gtk.Window):
         }
         save_power_rules(self.power_rules)
         self._plat_ts = 0.0
+        self._adaptive_armed = False
+        self._plat_last = read_platform_profile()
         self._set_status("Rules saved. Adaptive will follow them.")
 
     def _page_scheduler(self) -> Gtk.Widget:
         outer, box = self._page_shell(
             "Scheduler",
-            "When a switch is on, that rule replaces the Rules page for that situation. Same choices: Adaptive, Power save, or a forced Samsung mode.",
+            "When a switch is on, that rule replaces the Adaptive rule in CPU for that situation. Same choices: Adaptive, Power save, or a forced Samsung mode.",
         )
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         card.get_style_context().add_class("cpu-card")
@@ -4463,9 +4595,10 @@ class ControlWindow(Gtk.Window):
         self._plat_ts = 0.0
 
     def _tick(self) -> bool:
+        self.live = read_live()
+        self._maybe_adaptive()
         if not self.get_visible():
             return True
-        self.live = read_live()
         try:
             import psutil
 
@@ -4491,7 +4624,6 @@ class ControlWindow(Gtk.Window):
         self.mem_chart.queue_draw()
         self._paint_live()
         self._maybe_schedule()
-        self._maybe_adaptive()
         return True
 
     def _paint_live(self) -> None:
@@ -4537,10 +4669,16 @@ class ControlWindow(Gtk.Window):
         self.ui["batt_big"].set_text(pct)
         charging = live["state"] in ("charging", "pending-charge")
         powersave = mode in ("silent", "quiet")
-        self.dash_battery.set_reading(live["percent"], charging, powersave)
-        self.battery_icon.set_reading(live["percent"], charging, powersave)
+        fill = battery_profile_color()
+        self.dash_battery.set_reading(live["percent"], charging, powersave, fill)
+        self.battery_icon.set_reading(live["percent"], charging, powersave, fill)
+        running = SAMSUNG_LABELS.get(running_battery_mode(), running_battery_mode())
         if live["percent"] is not None and live["percent"] < 20:
             color_note = "Low battery — shown in red"
+        elif fill is not None and mode == "adaptive":
+            color_note = f"Adaptive — showing {running}"
+        elif fill is not None:
+            color_note = f"{running} color"
         elif powersave:
             color_note = "Power saver — shown in yellow"
         elif charging:
@@ -4641,6 +4779,7 @@ class ControlWindow(Gtk.Window):
             return
         load = float(self.live.get("cpu_pct") or 0)
         temp = self.live.get("temp")
+        live = read_platform_profile()
         choice = platform_for_rule(
             rule,
             load,
@@ -4651,14 +4790,13 @@ class ControlWindow(Gtk.Window):
         cooling = cooling_hold(choice, load, temp, self._plat_last)
         if not self._adaptive_armed:
             self._adaptive_armed = True
-            if not cooling:
-                self._plat_last = choice
-                self._plat_ts = now
-                return
-        if choice == self._plat_last and cooling == self._plat_cool:
-            return
-        if choice == read_platform_profile() and not cooling and not self._plat_cool:
+            # The firmware profile is what is actually running. Remembering the
+            # desired profile here made Silent + Quiet look applied while Balance stayed on.
+            self._plat_last = live
+        if choice == live and not cooling and not self._plat_cool:
             self._plat_last = choice
+            return
+        if choice == self._plat_last and cooling == self._plat_cool and choice == live:
             return
         self._plat_ts = now
         previous = self._plat_last

@@ -4,12 +4,13 @@ import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js'
 import * as Main from 'resource:///org/gnome/shell/ui/main.js'
 
 const DEFAULTS = {
-  adaptive: { enabled: true, color: '#C084FC' },
   silent: { enabled: true, color: '#2DBA6E' },
   quiet: { enabled: true, color: '#1FA7A0' },
   balance: { enabled: true, color: '#7EB8FF' },
   power: { enabled: true, color: '#3484E4' },
 }
+
+const TURBO_DEFAULT = { enabled: true, color: '#FFBE6F' }
 
 const PLATFORM_MODE = {
   'low-power': 'silent',
@@ -21,8 +22,10 @@ const PLATFORM_MODE = {
 export default class CpuPowerBatteryColor extends Extension {
   enable() {
     this._monitor = null
+    this._turboMonitor = null
     this._timeoutId = null
     this._pollId = null
+    this._painted = []
     this._timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1500, () => {
       this._start()
       this._timeoutId = null
@@ -43,7 +46,14 @@ export default class CpuPowerBatteryColor extends Extension {
       console.error(`[CPU Power] Could not watch mode files: ${e.message}`)
     }
     this._sync()
-    this._pollId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 2, () => {
+    try {
+      const turboFile = Gio.File.new_for_path('/sys/devices/system/cpu/intel_pstate/no_turbo')
+      this._turboMonitor = turboFile.monitor_file(Gio.FileMonitorFlags.NONE, null)
+      this._turboMonitor.connect('changed', () => this._sync())
+    } catch (e) {
+      this._turboMonitor = null
+    }
+    this._pollId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, () => {
       this._sync()
       return GLib.SOURCE_CONTINUE
     })
@@ -72,16 +82,19 @@ export default class CpuPowerBatteryColor extends Extension {
       return saved
     try {
       const profile = this._decode(GLib.file_get_contents('/sys/firmware/acpi/platform_profile')[1])
-      return PLATFORM_MODE[profile] || 'adaptive'
+      if (profile in PLATFORM_MODE)
+        return PLATFORM_MODE[profile]
     } catch (e) {
-      return 'adaptive'
+      // Fall through when the firmware profile is unreadable.
     }
+    return 'balance'
   }
 
   _readSettings() {
     const settings = {}
     for (const key of Object.keys(DEFAULTS))
       settings[key] = { ...DEFAULTS[key] }
+    settings.turbo = { ...TURBO_DEFAULT }
     const text = this._readText('battery-icon.json')
     if (!text)
       return settings
@@ -96,37 +109,130 @@ export default class CpuPowerBatteryColor extends Extension {
         if (typeof item.enabled === 'boolean')
           settings[key].enabled = item.enabled
       }
+      const turbo = raw.turbo && typeof raw.turbo === 'object' ? raw.turbo : raw.adaptive
+      if (turbo && typeof turbo === 'object') {
+        if (typeof turbo.color === 'string' && turbo.color.trim())
+          settings.turbo.color = turbo.color.trim()
+        if (typeof turbo.enabled === 'boolean')
+          settings.turbo.enabled = raw.turbo ? turbo.enabled : true
+      }
     } catch (e) {
       console.error(`[CPU Power] Battery color settings: ${e.message}`)
     }
     return settings
   }
 
-  _getPowerActor() {
-    const quickSettings = Main.panel.statusArea.quickSettings
-    if (!quickSettings?._indicators)
-      return null
-    const children = quickSettings._indicators.get_children()
-    return children.find(child => {
-      const isBattery = actor => {
-        if (actor.icon_name && actor.icon_name.includes('battery'))
-          return true
-        return actor.get_children?.().some(childActor => isBattery(childActor)) ?? false
+  _turboIsOn() {
+    try {
+      const noTurbo = this._decode(GLib.file_get_contents('/sys/devices/system/cpu/intel_pstate/no_turbo')[1])
+      if (noTurbo === '0')
+        return true
+      if (noTurbo === '1')
+        return false
+    } catch (e) {
+      // Some CPUs expose boost instead of intel_pstate.
+    }
+    try {
+      const boost = this._decode(GLib.file_get_contents('/sys/devices/system/cpu/cpufreq/boost')[1])
+      return boost === '1'
+    } catch (e) {
+      return false
+    }
+  }
+
+  _iconLabel(actor) {
+    const parts = []
+    try {
+      if (actor.icon_name)
+        parts.push(String(actor.icon_name))
+      if (actor.fallback_icon_name)
+        parts.push(String(actor.fallback_icon_name))
+      const gicon = actor.gicon
+      if (gicon?.get_names)
+        parts.push(...gicon.get_names())
+      else if (Array.isArray(gicon?.names))
+        parts.push(...gicon.names)
+    } catch (e) {
+      // A destroyed actor or a non-icon can be skipped.
+    }
+    return parts.join(' ').toLowerCase()
+  }
+
+  _iconActors() {
+    const quickSettings = Main.panel?.statusArea?.quickSettings
+    if (!quickSettings)
+      return []
+    const found = []
+    const seen = new Set()
+    const add = actor => {
+      if (!actor || seen.has(actor))
+        return
+      seen.add(actor)
+      found.push(actor)
+    }
+    const walk = (actor, fromSystem) => {
+      for (const child of actor.get_children?.() ?? []) {
+        const label = this._iconLabel(child)
+        const klass = String(child.style_class || '')
+        if (label.includes('battery') || (fromSystem && klass.includes('system-status-icon')))
+          add(child)
+        walk(child, fromSystem)
       }
-      return isBattery(child)
-    }) ?? null
+    }
+    if (quickSettings._system)
+      walk(quickSettings._system, true)
+    if (quickSettings._indicators)
+      walk(quickSettings._indicators, false)
+    return found
+  }
+
+  _percentageLabel() {
+    return Main.panel?.statusArea?.quickSettings?._system?._percentageLabel ?? null
+  }
+
+  _paint(iconStyle, labelStyle) {
+    const system = Main.panel?.statusArea?.quickSettings?._system
+    if (system) {
+      try {
+        system.set_style(null)
+      } catch (e) {
+        // The indicator box can be rebuilt.
+      }
+    }
+    const icons = iconStyle ? this._iconActors() : []
+    const label = this._percentageLabel()
+    const next = new Set(icons)
+    for (const actor of this._painted ?? []) {
+      if (next.has(actor))
+        continue
+      try {
+        actor.set_style(null)
+      } catch (e) {
+        // The panel may have rebuilt the icon since the last paint.
+      }
+    }
+    this._painted = icons
+    const paint = (actor, style) => {
+      if (!actor)
+        return
+      try {
+        actor.set_style(style)
+      } catch (e) {
+        // Ignore actors that disappeared mid-update.
+      }
+    }
+    for (const actor of icons)
+      paint(actor, iconStyle)
+    paint(label, labelStyle)
   }
 
   _sync() {
-    const actor = this._getPowerActor()
-    if (!actor)
-      return
-    const entry = this._readSettings()[this._readMode()]
-    if (!entry?.enabled) {
-      actor.set_style(null)
-      return
-    }
-    actor.set_style(`color: ${entry.color} !important;`)
+    const settings = this._readSettings()
+    const entry = settings[this._readMode()]
+    const turbo = settings.turbo
+    const iconStyle = entry?.enabled ? `color: ${entry.color} !important;` : null
+    const labelStyle = turbo?.enabled && this._turboIsOn() ? `color: ${turbo.color} !important;` : null
+    this._paint(iconStyle, labelStyle)
   }
 
   disable() {
@@ -142,8 +248,10 @@ export default class CpuPowerBatteryColor extends Extension {
       this._monitor.cancel()
       this._monitor = null
     }
-    const actor = this._getPowerActor()
-    if (actor)
-      actor.set_style(null)
+    if (this._turboMonitor) {
+      this._turboMonitor.cancel()
+      this._turboMonitor = null
+    }
+    this._paint(null, null)
   }
 }

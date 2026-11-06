@@ -1,0 +1,8 @@
+{
+  "uuid": "fpchoice-polkit@zorin.cpu-power",
+  "name": "Admin fingerprint",
+  "description": "Lets an enrolled finger accept the administrator password dialog.",
+  "shell-version": ["45", "46", "47", "48", "49"],
+  "session-modes": ["user", "zorin"],
+  "version": 1
+}

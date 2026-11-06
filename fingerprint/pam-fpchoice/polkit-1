@@ -1,0 +1,14 @@
+#%PAM-1.0
+# Password and fingerprint at the same time. common-auth is not included
+# because pam_fprintd would hold the reader and hide the password field
+# until the finger attempt times out.
+auth	[success=done ignore=ignore conv_err=die abort=die open_err=ignore auth_err=die default=ignore]	pam_fpchoice.so
+auth	[success=done default=ignore]	pam_unix.so nullok try_first_pass
+auth	requisite	pam_deny.so
+auth	required	pam_permit.so
+
+@include common-account
+@include common-password
+session	required	pam_env.so readenv=1 user_readenv=0
+session	required	pam_env.so readenv=1 envfile=/etc/default/locale user_readenv=0
+@include common-session-noninteractive
