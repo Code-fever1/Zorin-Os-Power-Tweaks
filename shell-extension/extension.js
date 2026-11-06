@@ -22,10 +22,13 @@ const PLATFORM_MODE = {
 export default class CpuPowerBatteryColor extends Extension {
   enable() {
     this._monitor = null
+    this._platformMonitor = null
     this._turboMonitor = null
     this._timeoutId = null
     this._pollId = null
     this._painted = []
+    this._lastIcon = undefined
+    this._lastLabel = undefined
     this._timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1500, () => {
       this._start()
       this._timeoutId = null
@@ -46,6 +49,13 @@ export default class CpuPowerBatteryColor extends Extension {
       console.error(`[CPU Power] Could not watch mode files: ${e.message}`)
     }
     this._sync()
+    try {
+      const platformFile = Gio.File.new_for_path('/sys/firmware/acpi/platform_profile')
+      this._platformMonitor = platformFile.monitor_file(Gio.FileMonitorFlags.NONE, null)
+      this._platformMonitor.connect('changed', () => this._sync())
+    } catch (e) {
+      this._platformMonitor = null
+    }
     try {
       const turboFile = Gio.File.new_for_path('/sys/devices/system/cpu/intel_pstate/no_turbo')
       this._turboMonitor = turboFile.monitor_file(Gio.FileMonitorFlags.NONE, null)
@@ -73,6 +83,23 @@ export default class CpuPowerBatteryColor extends Extension {
       return this._decode(GLib.file_get_contents(path)[1])
     } catch (e) {
       return ''
+    }
+  }
+
+  _readPublished() {
+    try {
+      const path = GLib.build_filenamev([this._configDir(), 'battery-live.json'])
+      const file = Gio.File.new_for_path(path)
+      const info = file.query_info('time::modified', Gio.FileQueryInfoFlags.NONE, null)
+      const age = GLib.get_real_time() / 1000000 - info.get_modification_date_time().to_unix()
+      if (age > 8)
+        return null
+      const raw = JSON.parse(this._readText('battery-live.json'))
+      if (!raw || typeof raw !== 'object' || !(raw.mode in DEFAULTS))
+        return null
+      return raw
+    } catch (e) {
+      return null
     }
   }
 
@@ -170,8 +197,14 @@ export default class CpuPowerBatteryColor extends Extension {
       seen.add(actor)
       found.push(actor)
     }
+    const percent = this._percentageLabel()
     const walk = (actor, fromSystem) => {
       for (const child of actor.get_children?.() ?? []) {
+        if (child === percent)
+          continue
+        const text = typeof child.text === 'string' ? child.text : ''
+        if (text.includes('%'))
+          continue
         const label = this._iconLabel(child)
         const klass = String(child.style_class || '')
         if (label.includes('battery') || (fromSystem && klass.includes('system-status-icon')))
@@ -228,10 +261,19 @@ export default class CpuPowerBatteryColor extends Extension {
 
   _sync() {
     const settings = this._readSettings()
-    const entry = settings[this._readMode()]
-    const turbo = settings.turbo
-    const iconStyle = entry?.enabled ? `color: ${entry.color} !important;` : null
-    const labelStyle = turbo?.enabled && this._turboIsOn() ? `color: ${turbo.color} !important;` : null
+    const published = this._readPublished()
+    const mode = published?.mode || this._readMode()
+    const entry = settings[mode]
+    const turboOn = published ? published.turbo_on === true : this._turboIsOn()
+    const tankColor = published?.tank_color || entry?.color
+    const turboColor = published?.turbo_color || settings.turbo?.color
+    const tankEnabled = published ? published.tank_enabled !== false : entry?.enabled
+    const iconStyle = tankEnabled && tankColor ? `color: ${tankColor} !important;` : null
+    const labelStyle = turboOn && turboColor ? `color: ${turboColor} !important;` : null
+    if (iconStyle === this._lastIcon && labelStyle === this._lastLabel)
+      return
+    this._lastIcon = iconStyle
+    this._lastLabel = labelStyle
     this._paint(iconStyle, labelStyle)
   }
 
@@ -247,6 +289,10 @@ export default class CpuPowerBatteryColor extends Extension {
     if (this._monitor) {
       this._monitor.cancel()
       this._monitor = null
+    }
+    if (this._platformMonitor) {
+      this._platformMonitor.cancel()
+      this._platformMonitor = null
     }
     if (this._turboMonitor) {
       this._turboMonitor.cancel()

@@ -51,6 +51,7 @@ SMOOTH_BRIGHTNESS_DEFAULTS = {
     "kbd_ambient_on_below_lux": 7.0,
 }
 BATTERY_ICON_FILE = Path.home() / ".config/zorin-cpu-power/battery-icon.json"
+BATTERY_LIVE_FILE = Path.home() / ".config/zorin-cpu-power/battery-live.json"
 BATTERY_ICON_MODES = (
     ("silent", "Silent", "#2DBA6E"),
     ("quiet", "Quiet", "#1FA7A0"),
@@ -1589,6 +1590,31 @@ def battery_profile_color() -> tuple[float, float, float] | None:
     return hex_to_rgb(str(entry.get("color") or ""))
 
 
+def publish_battery_live() -> None:
+    """Tell the panel extension the same mode and turbo state the app is showing."""
+    mode = running_battery_mode()
+    settings = load_battery_icon()
+    entry = settings.get(mode) or {}
+    turbo = settings.get("turbo") or {}
+    override = read_turbo_override()
+    turbo_on = False
+    if turbo.get("enabled", True) and override != "never":
+        live = read_turbo_live()
+        turbo_on = True if override == "always" else live is True
+    payload = {
+        "mode": mode,
+        "tank_enabled": bool(entry.get("enabled", True)),
+        "tank_color": str(entry.get("color") or ""),
+        "turbo_on": turbo_on,
+        "turbo_color": str(turbo.get("color") or ""),
+    }
+    try:
+        BATTERY_LIVE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        BATTERY_LIVE_FILE.write_text(json.dumps(payload) + "\n")
+    except OSError:
+        pass
+
+
 def read_platform_profile() -> str:
     return _read_file(str(PLATFORM_PROFILE)) or "balanced"
 
@@ -1831,10 +1857,18 @@ def format_profile_status(override: str | None = None, governor: str | None = No
     return label
 
 
-def format_turbo_status(override: str | None = None, _turbo_live: bool | None = None) -> str:
-    """Same words as the CPU turbo control and the tray: Auto, On, or Off."""
+def format_turbo_status(override: str | None = None, turbo_live: bool | None = None) -> str:
+    """Tray words (Auto / On / Off) plus live boost when turbo is automatic."""
     override = read_turbo_override() if override is None else override
-    return TURBO_LABELS.get(override, "Auto")
+    base = TURBO_LABELS.get(override, "Auto")
+    if override != "auto":
+        return base
+    turbo_live = read_turbo_live() if turbo_live is None else turbo_live
+    if turbo_live is True:
+        return f"{base} · On"
+    if turbo_live is False:
+        return f"{base} · Off"
+    return base
 
 
 def format_turbo_live(turbo_live: bool | None = None) -> str:
@@ -1850,7 +1884,7 @@ def read_status_footer() -> dict[str, str]:
     prof = read_override()
     prof_label = format_profile_status(prof)
     turbo = read_turbo_override()
-    turbo_label = format_turbo_status(turbo)
+    turbo_label = format_turbo_status(turbo, read_turbo_live())
     conf = read_auto_cpufreq_conf()
     cg = GOVERNOR_LABELS.get(conf["charger"]["governor"], conf["charger"]["governor"])
     bg = GOVERNOR_LABELS.get(conf["battery"]["governor"], conf["battery"]["governor"])
@@ -1884,9 +1918,6 @@ def _combo_value(combo: Gtk.ComboBoxText, values: tuple[str, ...]) -> str:
     idx = combo.get_active()
     if idx < 0 or idx >= len(values):
         return values[0]
-    return values[idx]
-
-
     return values[idx]
 
 
@@ -3924,7 +3955,7 @@ class ControlWindow(Gtk.Window):
         turbo.set_border_width(14)
         turbo.pack_start(Gtk.Label(label="Turbo boost", halign=Gtk.Align.START), False, False, 0)
         note = Gtk.Label(
-            label="Auto keeps turbo on while the CPU is busy. It turns turbo off when the laptop is idle, and on AC power also when it is warm and idle (about 65–70°C).",
+            label="Auto turns boost on only while the CPU stays busy (about 40% or more) and leaves it off below about 15%. It does not pulse on and off for small load changes. It also turns boost off when the CPU is warm and idle.",
             wrap=True,
             halign=Gtk.Align.START,
         )
@@ -4807,6 +4838,7 @@ class ControlWindow(Gtk.Window):
     def _tick(self) -> bool:
         self.live = read_live()
         self._maybe_adaptive()
+        publish_battery_live()
         if not self.get_visible():
             return True
         try:

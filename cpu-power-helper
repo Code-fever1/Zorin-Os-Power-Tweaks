@@ -46,7 +46,6 @@ cpu_floor() {
   local pstate="/sys/devices/system/cpu/intel_pstate"
   local cpu max min target epp
   if [[ "$mode" == high ]]; then
-    echo 0 >"$pstate/no_turbo" 2>/dev/null || true
     echo 100 >"$pstate/max_perf_pct" 2>/dev/null || true
     echo 100 >"$pstate/min_perf_pct" 2>/dev/null || true
   else
@@ -80,6 +79,32 @@ samsung_mode_is_power() {
     [[ "$mode" == power ]] && return 0
   done
   return 1
+}
+
+# Re-applying --turbo=auto on every profile change makes the daemon flip turbo
+# often; only call auto-cpufreq when the pickle differs from what we need.
+current_turbo_mode() {
+  python3 -c "
+import pickle
+from pathlib import Path
+p = Path('/opt/auto-cpufreq/turbo-override.pickle')
+if not p.is_file():
+    print('auto')
+else:
+    try:
+        v = pickle.loads(p.read_bytes())
+        print(v if v in ('never', 'always') else 'auto')
+    except Exception:
+        print('auto')
+" 2>/dev/null || echo "auto"
+}
+
+run_turbo_if_needed() {
+  local want="$1"
+  local cur
+  cur="$(current_turbo_mode)"
+  [[ "$cur" == "$want" ]] && return 0
+  "$AUTO_CPUFREQ" "--turbo=$want" || true
 }
 
 case "$1" in
@@ -202,30 +227,25 @@ case "$1" in
       silent)
         set_profile low-power
         "$AUTO_CPUFREQ" --force=powersave || true
-        "$AUTO_CPUFREQ" --turbo=never || true
         cpu_floor normal
         ;;
       quiet)
         set_profile quiet
         "$AUTO_CPUFREQ" --force=powersave || true
-        "$AUTO_CPUFREQ" --turbo=auto || true
         cpu_floor normal
         ;;
       balance)
         set_profile balanced
         "$AUTO_CPUFREQ" --force=reset || true
-        "$AUTO_CPUFREQ" --turbo=auto || true
         cpu_floor normal
         ;;
       power)
         set_power_profile
         "$AUTO_CPUFREQ" --force=performance || true
-        "$AUTO_CPUFREQ" --turbo=always || true
         cpu_floor high
         ;;
       adaptive)
         "$AUTO_CPUFREQ" --force=reset || true
-        "$AUTO_CPUFREQ" --turbo=auto || true
         cpu_floor normal
         ;;
       platform)
@@ -238,32 +258,27 @@ case "$1" in
           silent)
             set_profile "$3"
             "$AUTO_CPUFREQ" --force=powersave || true
-            "$AUTO_CPUFREQ" --turbo=never || true
             cpu_floor normal
             ;;
           quiet)
             set_profile "$3"
             "$AUTO_CPUFREQ" --force=powersave || true
-            "$AUTO_CPUFREQ" --turbo=auto || true
             cpu_floor normal
             ;;
           balance)
             set_profile "$3"
             "$AUTO_CPUFREQ" --force=reset || true
-            "$AUTO_CPUFREQ" --turbo=auto || true
             cpu_floor normal
             ;;
           power)
             set_power_profile
             "$AUTO_CPUFREQ" --force=performance || true
-            "$AUTO_CPUFREQ" --turbo=always || true
             cpu_floor high
             ;;
           cool)
             # Power fan while the CPU is still hot, without pinning the clocks.
             set_power_profile
             "$AUTO_CPUFREQ" --force=reset || true
-            "$AUTO_CPUFREQ" --turbo=auto || true
             cpu_floor normal
             ;;
           *)
