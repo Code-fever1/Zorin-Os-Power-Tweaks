@@ -1,0 +1,13 @@
+[Unit]
+Description=Smooth adaptive screen brightness (GNOME auto-brightness)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/smooth-adaptive-brightness
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

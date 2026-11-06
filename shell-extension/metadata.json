@@ -1,0 +1,8 @@
+{
+  "uuid": "cpu-power-battery-color@zorin.cpu-power",
+  "name": "CPU Power Battery Color",
+  "description": "Colors the panel battery icon from the mode selected in CPU Power.",
+  "shell-version": ["45", "46", "47", "48", "49"],
+  "session-modes": ["user", "zorin"],
+  "version": 1
+}

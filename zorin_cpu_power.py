@@ -37,6 +37,31 @@ LOCAL_ICON = Path.home() / ".local/share/zorin-cpu-power/icon.png"
 TRAY_ICON = Path.home() / ".local/share/zorin-cpu-power/tray-icon.png"
 USER_CONF = Path.home() / ".config/zorin-cpu-power/last-charge-limit"
 SAMSUNG_MODE_FILE = Path.home() / ".config/zorin-cpu-power/samsung-mode"
+KBD_CONF = Path.home() / ".config/zorin-cpu-power/keyboard.json"
+SMOOTH_BRIGHTNESS_CONF = Path.home() / ".config/smooth-adaptive-brightness/config.json"
+SMOOTH_BRIGHTNESS_BIN = Path.home() / ".local/bin/smooth-adaptive-brightness"
+SMOOTH_BRIGHTNESS_DEFAULTS = {
+    "ambient_bandwidth_hz": 0.035,
+    "brightness_time_constant_sec": 6.0,
+    "tick_ms": 100,
+    "auto_min_pct": 8.0,
+}
+BATTERY_ICON_FILE = Path.home() / ".config/zorin-cpu-power/battery-icon.json"
+BATTERY_ICON_MODES = (
+    ("adaptive", "Adaptive", "#C084FC"),
+    ("silent", "Silent", "#2DBA6E"),
+    ("quiet", "Quiet", "#1FA7A0"),
+    ("balance", "Balance", "#7EB8FF"),
+    ("power", "Power", "#3484E4"),
+)
+KBD_TIMEOUTS = (
+    (0, "Always on"),
+    (10, "10 sec"),
+    (30, "30 sec"),
+    (60, "1 min"),
+    (180, "3 min"),
+    (300, "5 min"),
+)
 PLATFORM_PROFILE = Path("/sys/firmware/acpi/platform_profile")
 SAMSUNG_LABELS = {
     "adaptive": "Adaptive",
@@ -132,6 +157,15 @@ window.cpubg {
 .cpu-card-desc {
   color: #8a96ae;
   font-size: 12px;
+}
+.cpu-beta-badge {
+  font-size: 10px;
+  font-weight: 700;
+  color: #fbbf24;
+  background-color: rgba(251, 191, 36, 0.12);
+  border: 1px solid rgba(251, 191, 36, 0.35);
+  border-radius: 6px;
+  padding: 2px 8px;
 }
 .profile-tile {
   background: rgba(14, 20, 38, 0.9);
@@ -312,11 +346,8 @@ window.tray-popup {
   background-color: transparent;
 }
 .tray-shell {
-  background-color: #151b28;
-  border: 1px solid rgba(72, 130, 255, 0.55);
-  border-radius: 18px;
-  box-shadow: 0 0 28px rgba(45, 120, 255, 0.35), 0 12px 40px rgba(0, 0, 0, 0.55);
-  padding: 14px 16px 16px 16px;
+  background-color: transparent;
+  padding: 14px 16px 22px 16px;
 }
 .tray-title {
   font-size: 15px;
@@ -332,12 +363,12 @@ window.tray-popup {
   font-size: 12px;
 }
 .tray-icon-btn {
-  background: rgba(20, 30, 52, 0.95);
-  border: 1px solid rgba(70, 110, 200, 0.35);
-  border-radius: 10px;
-  padding: 6px 10px;
-  min-width: 0;
-  min-height: 0;
+  background: rgba(22, 30, 48, 0.96);
+  border: 1px solid rgba(90, 120, 180, 0.28);
+  border-radius: 12px;
+  padding: 0;
+  min-width: 36px;
+  min-height: 36px;
 }
 .tray-icon-btn:hover {
   border-color: #5aa0ff;
@@ -360,11 +391,12 @@ window.tray-popup {
   font-weight: 600;
 }
 .tray-profile-btn {
-  background: rgba(14, 22, 40, 0.95);
-  border: 1px solid rgba(55, 85, 150, 0.45);
-  border-radius: 12px;
-  padding: 8px 6px;
-  min-width: 62px;
+  background: rgba(18, 26, 44, 0.96);
+  border: 1px solid rgba(70, 100, 160, 0.35);
+  border-radius: 14px;
+  padding: 0;
+  min-width: 58px;
+  min-height: 58px;
 }
 .tray-profile-btn:hover {
   border-color: #6aa8ff;
@@ -411,6 +443,25 @@ window.tray-popup {
   padding: 2px 10px;
   min-width: 0;
 }
+switch.tray-switch {
+  background: #3a445c;
+  border-color: #3a445c;
+  border-radius: 99px;
+  min-width: 42px;
+  min-height: 22px;
+}
+switch.tray-switch slider {
+  background: #e8eef8;
+  min-width: 16px;
+  min-height: 16px;
+}
+switch.tray-switch:checked {
+  background: #2f7bff;
+  border-color: #2f7bff;
+}
+switch.tray-switch:checked slider {
+  background: #ffffff;
+}
 progressbar.tray-charge-bar {
   min-height: 8px;
 }
@@ -455,24 +506,134 @@ def ensure_tray_icon() -> Path:
         cr.scale(size / 48.0, size / 48.0)
         cr.set_source_rgba(0, 0, 0, 0)
         cr.paint()
-        pad = 4.0
-        r = 10.0
-        cr.set_source_rgba(0.12, 0.22, 0.48, 1)
-        cr.new_sub_path()
-        cr.arc(48 - pad - r, pad + r, r, -math.pi / 2, 0)
-        cr.arc(48 - pad - r, 48 - pad - r, r, 0, math.pi / 2)
-        cr.arc(pad + r, 48 - pad - r, r, math.pi / 2, math.pi)
-        cr.arc(pad + r, pad + r, r, math.pi, 3 * math.pi / 2)
-        cr.close_path()
-        cr.fill()
-        cr.set_source_rgba(0.35, 0.65, 1.0, 0.85)
-        cr.set_line_width(2.2)
-        cr.stroke()
-        cr.set_source_rgb(1, 1, 1)
-        _draw_lightning(cr, 24, 24, 22)
+        cr.set_source_rgba(0.9, 0.92, 0.96, 1)
+        _draw_lightning(cr, 24, 24, 36)
         cr.fill()
         surface.write_to_png(str(path))
     return TRAY_ICON
+
+
+class LineIcon(Gtk.DrawingArea):
+    """Small line icon used in the tray popup."""
+
+    def __init__(self, kind: str, size: int = 18) -> None:
+        super().__init__()
+        self.kind = kind
+        self.set_size_request(size, size)
+        self.connect("draw", self._draw)
+
+    def _draw(self, _widget, cr) -> bool:
+        selected = False
+        parent = self.get_parent()
+        if parent is not None and parent.get_style_context().has_class("selected"):
+            selected = True
+        color = (1.0, 1.0, 1.0) if selected else (0.62, 0.74, 0.92)
+        paint_line_icon(cr, self.kind, self.get_allocated_width(), self.get_allocated_height(), color)
+        return False
+
+
+def paint_line_icon(cr, kind: str, w: float, h: float, color: tuple[float, float, float]) -> None:
+    cr.save()
+    cr.translate(w * 0.12, h * 0.12)
+    s = min(w, h) * 0.76
+    cr.set_source_rgb(*color)
+    cr.set_line_width(max(1.4, s * 0.09))
+    cr.set_line_cap(cairo.LINE_CAP_ROUND)
+    cr.set_line_join(cairo.LINE_JOIN_ROUND)
+    if kind == "bolt":
+        cr.set_line_width(0)
+        _draw_lightning(cr, s * 0.5, s * 0.52, s * 0.95)
+        cr.fill()
+    elif kind == "chart":
+        cr.move_to(s * 0.15, s * 0.75)
+        cr.line_to(s * 0.38, s * 0.48)
+        cr.line_to(s * 0.55, s * 0.62)
+        cr.line_to(s * 0.85, s * 0.22)
+        cr.stroke()
+    elif kind == "gear":
+        cr.arc(s * 0.5, s * 0.5, s * 0.18, 0, 2 * math.pi)
+        cr.stroke()
+        cr.arc(s * 0.5, s * 0.5, s * 0.36, 0, 2 * math.pi)
+        cr.stroke()
+    elif kind == "close":
+        cr.move_to(s * 0.25, s * 0.25)
+        cr.line_to(s * 0.75, s * 0.75)
+        cr.move_to(s * 0.75, s * 0.25)
+        cr.line_to(s * 0.25, s * 0.75)
+        cr.stroke()
+    elif kind == "chip":
+        cr.rectangle(s * 0.28, s * 0.28, s * 0.44, s * 0.44)
+        cr.stroke()
+        for t in (0.22, 0.42, 0.62):
+            cr.move_to(s * t, s * 0.12)
+            cr.line_to(s * t, s * 0.28)
+            cr.move_to(s * t, s * 0.72)
+            cr.line_to(s * t, s * 0.88)
+            cr.move_to(s * 0.12, s * t)
+            cr.line_to(s * 0.28, s * t)
+            cr.move_to(s * 0.72, s * t)
+            cr.line_to(s * 0.88, s * t)
+        cr.stroke()
+    elif kind == "thermo":
+        cr.arc(s * 0.5, s * 0.72, s * 0.16, 0, 2 * math.pi)
+        cr.stroke()
+        cr.rectangle(s * 0.42, s * 0.16, s * 0.16, s * 0.48)
+        cr.stroke()
+    elif kind == "layers":
+        cr.move_to(s * 0.5, s * 0.16)
+        cr.line_to(s * 0.86, s * 0.36)
+        cr.line_to(s * 0.5, s * 0.56)
+        cr.line_to(s * 0.14, s * 0.36)
+        cr.close_path()
+        cr.stroke()
+        cr.move_to(s * 0.14, s * 0.5)
+        cr.line_to(s * 0.5, s * 0.7)
+        cr.line_to(s * 0.86, s * 0.5)
+        cr.move_to(s * 0.14, s * 0.66)
+        cr.line_to(s * 0.5, s * 0.86)
+        cr.line_to(s * 0.86, s * 0.66)
+        cr.stroke()
+    elif kind == "leaf":
+        cr.move_to(s * 0.22, s * 0.78)
+        cr.curve_to(s * 0.18, s * 0.3, s * 0.55, s * 0.12, s * 0.82, s * 0.22)
+        cr.curve_to(s * 0.7, s * 0.7, s * 0.4, s * 0.82, s * 0.22, s * 0.78)
+        cr.stroke()
+    elif kind == "scales":
+        cr.move_to(s * 0.5, s * 0.18)
+        cr.line_to(s * 0.5, s * 0.78)
+        cr.move_to(s * 0.28, s * 0.82)
+        cr.line_to(s * 0.72, s * 0.82)
+        cr.move_to(s * 0.18, s * 0.34)
+        cr.line_to(s * 0.82, s * 0.34)
+        cr.stroke()
+        cr.arc(s * 0.28, s * 0.48, s * 0.12, math.pi, 0)
+        cr.arc(s * 0.72, s * 0.48, s * 0.12, math.pi, 0)
+        cr.stroke()
+    elif kind == "gauge":
+        cr.arc(s * 0.5, s * 0.58, s * 0.32, math.pi * 0.15, math.pi * 0.85)
+        cr.stroke()
+        cr.move_to(s * 0.5, s * 0.58)
+        cr.line_to(s * 0.72, s * 0.36)
+        cr.stroke()
+    elif kind == "spark":
+        cr.move_to(s * 0.5, s * 0.1)
+        cr.line_to(s * 0.5, s * 0.9)
+        cr.move_to(s * 0.1, s * 0.5)
+        cr.line_to(s * 0.9, s * 0.5)
+        cr.move_to(s * 0.22, s * 0.22)
+        cr.line_to(s * 0.78, s * 0.78)
+        cr.move_to(s * 0.78, s * 0.22)
+        cr.line_to(s * 0.22, s * 0.78)
+        cr.stroke()
+    elif kind == "battery":
+        cr.rectangle(s * 0.16, s * 0.28, s * 0.58, s * 0.44)
+        cr.stroke()
+        cr.rectangle(s * 0.74, s * 0.4, s * 0.1, s * 0.2)
+        cr.fill()
+    else:
+        cr.arc(s * 0.5, s * 0.5, s * 0.2, 0, 2 * math.pi)
+        cr.stroke()
+    cr.restore()
 
 
 class TrayCpuGauge(Gtk.DrawingArea):
@@ -523,10 +684,10 @@ class TrayCpuGauge(Gtk.DrawingArea):
 
 
 TRAY_PROFILES = (
-    ("🍃", "Eco", "silent"),
-    ("⚖", "Balanced", "balance"),
-    ("⏱", "Performance", "power"),
-    ("✦", "Turbo", "turbo"),
+    ("leaf", "Eco", "silent"),
+    ("scales", "Balanced", "balance"),
+    ("gauge", "Performance", "power"),
+    ("spark", "Turbo", "turbo"),
 )
 
 
@@ -536,78 +697,89 @@ class TrayPopupWindow(Gtk.Window):
         self.app = app
         self._updating = False
         self._profile_btns: dict[str, Gtk.Button] = {}
+        self._tail_x = 330
+        self._tail_down = True
+        self.set_app_paintable(True)
+        screen = self.get_screen()
+        visual = screen.get_rgba_visual() if screen else None
+        if visual is not None:
+            self.set_visual(visual)
         self.set_decorated(False)
         self.set_resizable(False)
         self.set_skip_taskbar_hint(True)
         self.set_keep_above(True)
         self.set_type_hint(Gdk.WindowTypeHint.DIALOG)
-        self.set_default_size(520, 340)
+        self.set_default_size(680, 332)
         self.get_style_context().add_class("tray-popup")
+        self.connect("draw", self._paint_chrome)
         self.connect("delete-event", lambda *_: self.hide() or True)
         self.connect("key-press-event", self._on_key)
 
-        outer = Gtk.EventBox()
-        shell = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        shell = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         shell.get_style_context().add_class("tray-shell")
-        shell.set_border_width(0)
-        outer.add(shell)
-        self.add(outer)
+        self.add(shell)
 
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        bolt = Gtk.Label(label="⚡")
+        logo = Gtk.DrawingArea()
+        logo.set_size_request(34, 34)
+        logo.connect("draw", self._paint_logo)
         title = Gtk.Label(label="CPU Power")
         title.get_style_context().add_class("tray-title")
-        title.set_halign(Gtk.Align.START)
-        title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        title_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        title_row.pack_start(bolt, False, False, 0)
+        self.status_lbl = Gtk.Label()
+        self.status_lbl.set_markup("<span color='#3ddc84'>●</span>  <span color='#c5d0e4'>Running</span>")
+        title_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        title_row.pack_start(logo, False, False, 0)
         title_row.pack_start(title, False, False, 0)
-        title_box.pack_start(title_row, False, False, 0)
-        self.status_lbl = Gtk.Label(label="● Running")
-        self.status_lbl.set_halign(Gtk.Align.START)
-        self.status_lbl.get_style_context().add_class("tray-status-ok")
-        title_box.pack_start(self.status_lbl, False, False, 0)
-        header.pack_start(title_box, True, True, 0)
-        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        for icon, cb in (("📊", self._open_monitor), ("⚙", self._open_settings), ("✕", self.hide)):
-            btn = Gtk.Button(label=icon)
+        title_row.pack_start(self.status_lbl, False, False, 0)
+        title_row.set_valign(Gtk.Align.CENTER)
+        header.pack_start(title_row, True, True, 0)
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        for kind, tip, cb in (
+            ("chart", "Monitor", self._open_monitor),
+            ("gear", "Settings", self._open_settings),
+            ("close", "Close", self.hide),
+        ):
+            btn = Gtk.Button()
+            btn.set_tooltip_text(tip)
             btn.get_style_context().add_class("tray-icon-btn")
+            btn.set_size_request(36, 36)
+            btn.add(LineIcon(kind, 16))
             btn.connect("clicked", lambda _b, f=cb: f())
             actions.pack_start(btn, False, False, 0)
         header.pack_start(actions, False, False, 0)
         shell.pack_start(header, False, False, 0)
 
-        mid = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        mid = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         mid.get_style_context().add_class("tray-mid-card")
         self.gauge = TrayCpuGauge()
         mid.pack_start(self.gauge, False, False, 0)
-        stats = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        stats = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         stats.set_valign(Gtk.Align.CENTER)
-        self.stat_freq = Gtk.Label(label="🧠 — GHz", halign=Gtk.Align.START)
-        self.stat_temp = Gtk.Label(label="🌡 — °C", halign=Gtk.Align.START)
-        self.stat_watts = Gtk.Label(label="⚡ — W", halign=Gtk.Align.START)
-        for lbl in (self.stat_freq, self.stat_temp, self.stat_watts):
+        self.stat_freq = Gtk.Label(halign=Gtk.Align.START)
+        self.stat_temp = Gtk.Label(halign=Gtk.Align.START)
+        self.stat_watts = Gtk.Label(halign=Gtk.Align.START)
+        for kind, lbl in (("chip", self.stat_freq), ("thermo", self.stat_temp), ("bolt", self.stat_watts)):
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            row.pack_start(LineIcon(kind, 16), False, False, 0)
             lbl.get_style_context().add_class("tray-stat")
-            stats.pack_start(lbl, False, False, 0)
+            row.pack_start(lbl, False, False, 0)
+            stats.pack_start(row, False, False, 0)
         mid.pack_start(stats, False, False, 0)
         prof_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         prof_box.set_hexpand(True)
-        pl = Gtk.Label(label="☰  Profile", halign=Gtk.Align.START)
+        prof_head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        prof_head.pack_start(LineIcon("layers", 14), False, False, 0)
+        pl = Gtk.Label(label="Profile", halign=Gtk.Align.START)
         pl.get_style_context().add_class("tray-profile-label")
-        prof_box.pack_start(pl, False, False, 0)
-        prof_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        prof_head.pack_start(pl, False, False, 0)
+        prof_box.pack_start(prof_head, False, False, 0)
+        prof_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         prof_row.set_homogeneous(True)
-        for icon, name, mode in TRAY_PROFILES:
+        for kind, name, mode in TRAY_PROFILES:
             btn = Gtk.Button()
+            btn.set_tooltip_text(name)
             btn.get_style_context().add_class("tray-profile-btn")
-            inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-            ic = Gtk.Label(label=icon)
-            ic.get_style_context().add_class("tray-profile-icon")
-            nm = Gtk.Label(label=name)
-            nm.get_style_context().add_class("tray-profile-name")
-            inner.pack_start(ic, False, False, 0)
-            inner.pack_start(nm, False, False, 0)
-            btn.add(inner)
+            btn.add(LineIcon(kind, 22))
             btn.connect("clicked", self._on_profile, mode)
             prof_row.pack_start(btn, True, True, 0)
             self._profile_btns[mode] = btn
@@ -616,30 +788,37 @@ class TrayPopupWindow(Gtk.Window):
         shell.pack_start(mid, False, False, 0)
 
         bottom = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        turbo_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        turbo_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         turbo_card.get_style_context().add_class("tray-bottom-card")
-        turbo_card.set_size_request(200, -1)
-        tl = Gtk.Label(label="⚡  Turbo", halign=Gtk.Align.START)
+        turbo_card.set_size_request(168, -1)
+        turbo_head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        turbo_head.pack_start(LineIcon("bolt", 16), False, False, 0)
+        tl = Gtk.Label(label="Turbo", halign=Gtk.Align.START)
         tl.get_style_context().add_class("tray-field-label")
-        turbo_card.pack_start(tl, False, False, 0)
+        turbo_head.pack_start(tl, False, False, 0)
+        turbo_card.pack_start(turbo_head, False, False, 0)
         self.turbo_combo = Gtk.ComboBoxText()
-        for label, mode in (("Auto", "auto"), ("Off", "never"), ("On", "always")):
+        for label, _mode in (("Auto", "auto"), ("Off", "never"), ("On", "always")):
             self.turbo_combo.append_text(label)
         self.turbo_combo.get_style_context().add_class("tray-combo")
         self.turbo_combo.connect("changed", self._on_turbo_changed)
         turbo_card.pack_start(self.turbo_combo, False, False, 0)
-        bottom.pack_start(turbo_card, True, True, 0)
+        bottom.pack_start(turbo_card, False, False, 0)
 
-        charge_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        charge_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         charge_card.get_style_context().add_class("tray-bottom-card")
         charge_card.set_hexpand(True)
-        cl = Gtk.Label(label="🔋  Charge Limit", halign=Gtk.Align.START)
-        cl.get_style_context().add_class("tray-field-label")
-        charge_card.pack_start(cl, False, False, 0)
         charge_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        charge_row.pack_start(LineIcon("battery", 16), False, False, 0)
+        cl = Gtk.Label(label="Charge Limit", halign=Gtk.Align.START)
+        cl.get_style_context().add_class("tray-field-label")
+        charge_row.pack_start(cl, False, False, 0)
         self.charge_on = Gtk.Switch()
+        self.charge_on.set_valign(Gtk.Align.CENTER)
+        self.charge_on.get_style_context().add_class("tray-switch")
         self.charge_on.connect("notify::active", self._on_charge_toggle)
         charge_row.pack_start(self.charge_on, False, False, 0)
+        charge_row.pack_start(Gtk.Box(), True, True, 0)
         minus = Gtk.Button(label="−")
         minus.get_style_context().add_class("tray-step-btn")
         minus.connect("clicked", self._charge_step, -1)
@@ -648,8 +827,8 @@ class TrayPopupWindow(Gtk.Window):
         plus.connect("clicked", self._charge_step, 1)
         self.charge_pct = Gtk.Label(label="80%")
         self.charge_pct.get_style_context().add_class("tray-stat")
-        charge_row.pack_start(minus, False, False, 0)
         charge_row.pack_start(self.charge_pct, False, False, 0)
+        charge_row.pack_start(minus, False, False, 0)
         charge_row.pack_start(plus, False, False, 0)
         charge_card.pack_start(charge_row, False, False, 0)
         self.charge_bar = Gtk.ProgressBar()
@@ -662,6 +841,62 @@ class TrayPopupWindow(Gtk.Window):
         self._charge_value = 80
         self._tick_id = GLib.timeout_add_seconds(2, self._refresh_tick)
         self.refresh()
+
+    def _paint_logo(self, _widget, cr) -> bool:
+        w = _widget.get_allocated_width()
+        h = _widget.get_allocated_height()
+        radius = 8
+        cr.set_source_rgb(0.18, 0.42, 0.95)
+        cr.new_sub_path()
+        cr.arc(w - radius, radius, radius, -math.pi / 2, 0)
+        cr.arc(w - radius, h - radius, radius, 0, math.pi / 2)
+        cr.arc(radius, h - radius, radius, math.pi / 2, math.pi)
+        cr.arc(radius, radius, radius, math.pi, 3 * math.pi / 2)
+        cr.close_path()
+        cr.fill()
+        cr.set_source_rgb(1, 1, 1)
+        _draw_lightning(cr, w / 2, h / 2, min(w, h) * 0.62)
+        cr.fill()
+        return False
+
+    def _round_rect(self, cr, x, y, w, h, r) -> None:
+        cr.new_sub_path()
+        cr.arc(x + w - r, y + r, r, -math.pi / 2, 0)
+        cr.arc(x + w - r, y + h - r, r, 0, math.pi / 2)
+        cr.arc(x + r, y + h - r, r, math.pi / 2, math.pi)
+        cr.arc(x + r, y + r, r, math.pi, 3 * math.pi / 2)
+        cr.close_path()
+
+    def _paint_chrome(self, _widget, cr) -> bool:
+        w = self.get_allocated_width()
+        h = self.get_allocated_height()
+        if w < 20 or h < 20:
+            return False
+        tail = 12
+        if self._tail_down:
+            top, body_h = 1, h - tail - 2
+        else:
+            top, body_h = tail + 1, h - tail - 2
+        cr.set_source_rgba(0.07, 0.09, 0.14, 0.98)
+        self._round_rect(cr, 1, top, w - 2, body_h, 20)
+        cr.fill()
+        cr.set_source_rgba(0.28, 0.55, 1.0, 0.55)
+        cr.set_line_width(1.4)
+        self._round_rect(cr, 1.5, top, w - 3, body_h, 20)
+        cr.stroke()
+        tx = max(28, min(w - 28, self._tail_x))
+        cr.set_source_rgba(0.07, 0.09, 0.14, 0.98)
+        if self._tail_down:
+            cr.move_to(tx - 11, top + body_h - 1)
+            cr.line_to(tx, h - 1)
+            cr.line_to(tx + 11, top + body_h - 1)
+        else:
+            cr.move_to(tx - 11, top + 1)
+            cr.line_to(tx, 1)
+            cr.line_to(tx + 11, top + 1)
+        cr.close_path()
+        cr.fill()
+        return False
 
     def _on_key(self, _w, event) -> bool:
         if event.keyval == Gdk.KEY_Escape:
@@ -697,6 +932,7 @@ class TrayPopupWindow(Gtk.Window):
                 ctx.add_class("selected")
             else:
                 ctx.remove_class("selected")
+            btn.queue_draw()
 
     def refresh(self) -> None:
         live = read_live()
@@ -704,17 +940,13 @@ class TrayPopupWindow(Gtk.Window):
         freq = f"{live['freq_ghz']:.2f} GHz" if live["freq_ghz"] else "—"
         temp = f"{live['temp']:.0f} °C" if live["temp"] is not None else "—"
         watts = f"{live['rate_w']:.1f} W" if live["rate_w"] is not None else "—"
-        self.stat_freq.set_text(f"🧠  {freq}")
-        self.stat_temp.set_text(f"🌡  {temp}")
-        self.stat_watts.set_text(f"⚡  {watts}")
+        self.stat_freq.set_text(freq)
+        self.stat_temp.set_text(temp)
+        self.stat_watts.set_text(watts)
         if is_auto_cpufreq_daemon_active():
-            self.status_lbl.set_text("● Running")
-            self.status_lbl.get_style_context().add_class("tray-status-ok")
-            self.status_lbl.get_style_context().remove_class("tray-status-bad")
+            self.status_lbl.set_markup("<span color='#3ddc84'>●</span>  <span color='#c5d0e4'>Running</span>")
         else:
-            self.status_lbl.set_text("● Daemon off")
-            self.status_lbl.get_style_context().add_class("tray-status-bad")
-            self.status_lbl.get_style_context().remove_class("tray-status-ok")
+            self.status_lbl.set_markup("<span color='#f87171'>●</span>  <span color='#c5d0e4'>Daemon off</span>")
         self._updating = True
         turbo = read_turbo_override()
         turbo_idx = {"auto": 0, "never": 1, "always": 2}.get(turbo, 0)
@@ -831,25 +1063,50 @@ class TrayPopupWindow(Gtk.Window):
 
         schedule_apply(work, done)
 
-    def present_near_tray(self) -> None:
+    def present_at(self, anchor_x: int, anchor_y: int, panel_position: int = 3) -> None:
         self.refresh()
         self.show_all()
-        w, h = 520, 340
+        w, h = 680, 332
         self.resize(w, h)
+        # GTK position type: 2 top, 3 bottom, 0 left, 1 right.
+        self._tail_down = panel_position != 2
+        if self._tail_down:
+            origin_x = int(anchor_x - w / 2)
+            origin_y = int(anchor_y - h - 4)
+        else:
+            origin_x = int(anchor_x - w / 2)
+            origin_y = int(anchor_y + 6)
         display = Gdk.Display.get_default()
-        if not display:
-            self.present()
-            return
-        monitor = display.get_primary_monitor() or display.get_monitor(0)
-        if not monitor:
-            self.present()
-            return
-        geo = monitor.get_geometry()
-        x = geo.x + geo.width - w - 16
-        y = geo.y + geo.height - h - 56
-        self.move(max(geo.x + 8, x), max(geo.y + 8, y))
+        monitor = None
+        if display is not None and hasattr(display, "get_monitor_at_point"):
+            monitor = display.get_monitor_at_point(int(anchor_x), int(anchor_y))
+        if monitor is None and display is not None:
+            monitor = display.get_primary_monitor() or display.get_monitor(0)
+        if monitor is not None:
+            geo = monitor.get_geometry()
+            origin_x = max(geo.x + 8, min(origin_x, geo.x + geo.width - w - 8))
+            origin_y = max(geo.y + 8, min(origin_y, geo.y + geo.height - h - 8))
+        self._tail_x = int(anchor_x - origin_x)
+        self.move(origin_x, origin_y)
         self.present()
         self.grab_focus()
+        self.queue_draw()
+
+    def present_near_tray(self) -> None:
+        display = Gdk.Display.get_default()
+        x = y = 0
+        if display is not None:
+            seat = display.get_default_seat()
+            pointer = seat.get_pointer() if seat else None
+            if pointer is not None:
+                _screen, x, y = pointer.get_position()
+        if not x and not y:
+            monitor = display.get_primary_monitor() if display else None
+            if monitor is not None:
+                geo = monitor.get_geometry()
+                x = geo.x + geo.width // 2
+                y = geo.y + geo.height - 8
+        self.present_at(int(x), int(y), 3)
 
 
 def schedule_apply(work, on_done) -> bool:
@@ -885,10 +1142,138 @@ def schedule_apply(work, on_done) -> bool:
     return True
 
 
+def _admin_schema():
+    gi.require_version("Secret", "1")
+    from gi.repository import Secret
+
+    return Secret.Schema.new(
+        "com.zorin.cpu-power.AdminPassword",
+        Secret.SchemaFlags.NONE,
+        {"app": Secret.SchemaAttributeType.STRING},
+    )
+
+
+def load_admin_password() -> str | None:
+    try:
+        gi.require_version("Secret", "1")
+        from gi.repository import Secret
+
+        stored = Secret.password_lookup_sync(_admin_schema(), {"app": "zorin-cpu-power"}, None)
+    except (GLib.Error, ValueError, ImportError):
+        return None
+    return stored or None
+
+
+def admin_password_saved() -> bool:
+    return bool(load_admin_password())
+
+
+def _sudo_rejected(text: str) -> bool:
+    lower = text.lower()
+    return any(
+        phrase in lower
+        for phrase in (
+            "incorrect password",
+            "sorry, try again",
+            "authentication failure",
+            "no password was provided",
+        )
+    )
+
+
+def _clean_sudo_output(text: str) -> str:
+    kept = []
+    for line in text.splitlines():
+        lower = line.lower().strip()
+        if not lower or lower.startswith("[sudo]") or lower == "password:":
+            continue
+        kept.append(line)
+    return "\n".join(kept).strip()
+
+
+def _run_sudo(password: str, args: list[str], timeout: int) -> tuple[bool, str]:
+    cmd = ["sudo", "-S", "-k", "-p", "", "--", str(PRIV_HELPER), *args]
+    try:
+        proc = subprocess.run(
+            cmd,
+            input=password + "\n",
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "Timed out while applying the change."
+    except FileNotFoundError:
+        return False, "sudo was not found."
+    blob = (proc.stderr or "") + "\n" + (proc.stdout or "")
+    if proc.returncode != 0 and _sudo_rejected(blob):
+        return False, "Saved password was rejected. Enter the new one in Settings."
+    out = _clean_sudo_output((proc.stdout or "") + "\n" + (proc.stderr or ""))
+    if proc.returncode != 0:
+        return False, out or f"Command failed (exit {proc.returncode})."
+    return True, out
+
+
+def check_admin_password(password: str) -> tuple[bool, str]:
+    if not password:
+        return False, "Enter your login password."
+    try:
+        proc = subprocess.run(
+            ["sudo", "-S", "-k", "-p", "", "--", "true"],
+            input=password + "\n",
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "Password check timed out."
+    except FileNotFoundError:
+        return False, "sudo was not found."
+    if proc.returncode != 0:
+        return False, "That password was not accepted."
+    return True, ""
+
+
+def save_admin_password(password: str) -> tuple[bool, str]:
+    ok, msg = check_admin_password(password)
+    if not ok:
+        return ok, msg
+    try:
+        gi.require_version("Secret", "1")
+        from gi.repository import Secret
+
+        stored = Secret.password_store_sync(
+            _admin_schema(),
+            {"app": "zorin-cpu-power"},
+            Secret.COLLECTION_DEFAULT,
+            "CPU Power login password",
+            password,
+            None,
+        )
+    except (GLib.Error, ValueError, ImportError) as exc:
+        return False, f"Could not save the password ({exc})."
+    if not stored:
+        return False, "Could not save the password in the login keyring."
+    return True, "Password saved. Changes apply without asking."
+
+
+def forget_admin_password() -> tuple[bool, str]:
+    try:
+        gi.require_version("Secret", "1")
+        from gi.repository import Secret
+
+        Secret.password_clear_sync(_admin_schema(), {"app": "zorin-cpu-power"}, None)
+    except (GLib.Error, ValueError, ImportError) as exc:
+        return False, f"Could not remove the saved password ({exc})."
+    return True, "Saved password removed. Changes will ask again."
+
+
 def run_pkexec(args: list[str], timeout: int = 120) -> tuple[bool, str]:
-    # pkexec has no --action-id flag. The helper path matches the polkit rule,
-    # which shows the password dialog.
+    # A saved login password applies the helper with sudo and skips the dialog.
     if PRIV_HELPER.is_file():
+        password = load_admin_password()
+        if password:
+            return _run_sudo(password, args, timeout)
         cmd = ["pkexec", str(PRIV_HELPER)] + args
     else:
         cmd = ["pkexec"] + args
@@ -917,12 +1302,20 @@ def run_pkexec(args: list[str], timeout: int = 120) -> tuple[bool, str]:
 
 
 def start_auto_cpufreq_daemon() -> None:
+    # A plain systemctl start asks for a password through PolicyKit on every
+    # profile or turbo change, even after the helper already applied it.
+    if is_auto_cpufreq_daemon_active():
+        return
+    password = load_admin_password()
+    if not password:
+        return
     try:
         subprocess.run(
-            ["systemctl", "start", "auto-cpufreq.service"],
+            ["sudo", "-S", "-p", "", "--", "systemctl", "start", "auto-cpufreq.service"],
+            input=password + "\n",
             capture_output=True,
+            text=True,
             timeout=15,
-            check=False,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass
@@ -1071,6 +1464,49 @@ def write_samsung_mode(mode: str) -> None:
     SAMSUNG_MODE_FILE.write_text(mode)
 
 
+def default_battery_icon() -> dict:
+    return {
+        key: {"enabled": True, "color": color}
+        for key, _label, color in BATTERY_ICON_MODES
+    }
+
+
+def load_battery_icon() -> dict:
+    settings = default_battery_icon()
+    try:
+        raw = json.loads(BATTERY_ICON_FILE.read_text())
+    except (OSError, json.JSONDecodeError, TypeError):
+        return settings
+    if not isinstance(raw, dict):
+        return settings
+    for key, _label, color in BATTERY_ICON_MODES:
+        item = raw.get(key)
+        if not isinstance(item, dict):
+            continue
+        chosen = str(item.get("color") or color).strip()
+        if chosen:
+            settings[key]["color"] = chosen
+        settings[key]["enabled"] = bool(item.get("enabled", True))
+    return settings
+
+
+def save_battery_icon(settings: dict) -> None:
+    payload = {}
+    defaults = default_battery_icon()
+    for key, _label, _color in BATTERY_ICON_MODES:
+        item = settings.get(key) if isinstance(settings.get(key), dict) else {}
+        payload[key] = {
+            "enabled": bool(item.get("enabled", defaults[key]["enabled"])),
+            "color": str(item.get("color") or defaults[key]["color"]),
+        }
+    BATTERY_ICON_FILE.parent.mkdir(parents=True, exist_ok=True)
+    BATTERY_ICON_FILE.write_text(json.dumps(payload, indent=2) + "\n")
+
+
+def rgba_to_hex(rgba: Gdk.RGBA) -> str:
+    return f"#{int(round(rgba.red * 255)):02X}{int(round(rgba.green * 255)):02X}{int(round(rgba.blue * 255)):02X}"
+
+
 def read_platform_profile() -> str:
     return _read_file(str(PLATFORM_PROFILE)) or "balanced"
 
@@ -1098,14 +1534,34 @@ def choose_samsung_platform(load: float, temp: float | None, plugged: bool, prev
     else:
         raw = "quiet"
     if previous == "performance" and plugged and load >= 35 and temp < 82:
-        return "performance"
-    if previous == "low-power" and load <= 14 and temp < 52:
-        return "low-power"
-    if previous == "quiet" and 8 < load < 28 and temp < 72:
-        return "quiet"
-    if previous == "balanced" and 15 < load < 58 and temp < 80:
-        return "balanced"
-    return raw
+        raw = "performance"
+    elif previous == "low-power" and load <= 14 and temp < 52:
+        raw = "low-power"
+    elif previous == "quiet" and 8 < load < 28 and temp < 72:
+        raw = "quiet"
+    elif previous == "balanced" and 15 < load < 58 and temp < 80:
+        raw = "balanced"
+    return hold_until_cool(raw, previous, temp)
+
+
+def hold_until_cool(choice: str, previous: str | None, temp: float) -> str:
+    """After Power or Balance, keep that fan until the CPU has cooled.
+
+    Load falls as soon as a hard task ends. Temperature does not. Quiet and
+    Silent would drop the fan while the laptop is still hot.
+    """
+    if choice == "low-power" and temp >= 48:
+        choice = "quiet"
+    if choice in ("quiet", "low-power") and temp >= 55 and previous in ("performance", "balanced"):
+        return "performance" if previous == "performance" else "balanced"
+    return choice
+
+
+def cooling_hold(choice: str, load: float, temp: float | None, previous: str | None) -> bool:
+    """Power fan, but let the CPU clocks fall so the temperature can come down."""
+    if temp is None:
+        return False
+    return choice == "performance" and previous == "performance" and load < 35 and temp >= 55
 
 
 POWER_RULES = ("adaptive", "powersave", "silent", "quiet", "balance", "power")
@@ -1171,15 +1627,17 @@ def platform_for_rule(rule: str, load: float, temp: float | None, plugged: bool,
     return SAMSUNG_PLATFORM[rule]
 
 
-def apply_platform_choice(platform: str) -> tuple[bool, str]:
-    kind = PLATFORM_KIND.get(platform)
+def apply_platform_choice(platform: str, cooling: bool = False) -> tuple[bool, str]:
+    kind = "cool" if cooling else PLATFORM_KIND.get(platform)
     if not kind:
         return False, f"Unknown platform profile: {platform}"
     ok, msg = run_pkexec(["samsung-mode", "apply", platform, kind])
-    if not ok and "Rejected" in msg:
+    if not ok and "Rejected" in msg and not cooling:
         ok, msg = run_pkexec(["samsung-mode", "platform", platform])
     if not ok:
         return ok, msg
+    if cooling:
+        return True, "Cooling down on the Power fan"
     shown = {"low-power": "Silent", "quiet": "Quiet", "balanced": "Balance", "performance": "Power"}[platform]
     return True, f"Using {shown}"
 
@@ -2309,11 +2767,479 @@ def save_schedule(data: dict) -> None:
     SCHEDULE_PATH.write_text(json.dumps(data, indent=2))
 
 
+def find_kbd_led() -> tuple[str, Path] | None:
+    root = Path("/sys/class/leds")
+    if not root.is_dir():
+        return None
+    candidates: list[tuple[str, Path]] = []
+    for path in sorted(root.iterdir()):
+        if "kbd_backlight" in path.name:
+            candidates.append((path.name, path))
+    if not candidates:
+        return None
+    for prefer in ("samsung-galaxybook", "galaxybook"):
+        for name, path in candidates:
+            if prefer in name:
+                return name, path
+    return candidates[0]
+
+
+def kbd_level_name(level: int, maximum: int) -> str:
+    if level <= 0:
+        return "Off"
+    if maximum <= 1 or level >= maximum:
+        return "High" if maximum > 1 else "On"
+    if level == 1:
+        return "Low"
+    return "Medium"
+
+
+def kbd_timeout_name(seconds: int) -> str:
+    for value, label in KBD_TIMEOUTS:
+        if value == seconds:
+            return label
+    if seconds <= 0:
+        return "Always on"
+    if seconds < 60:
+        return f"{seconds} sec"
+    return f"{seconds // 60} min"
+
+
+class KeyboardLight:
+    """Backlight brightness plus an idle timer.
+
+    Brightness is written through the login session, which is allowed to
+    change the Samsung keyboard LED. The timer uses the GNOME idle clock,
+    so the light turns off after no keyboard or mouse use and comes back
+    on the next use. The chosen brightness is remembered while it is off.
+    """
+
+    def __init__(self) -> None:
+        found = find_kbd_led()
+        self.led_name = found[0] if found else ""
+        self.led_path = found[1] if found else None
+        self.max_brightness = self._read_max()
+        self.level = 0
+        self.timeout_sec = 30
+        self._blanked = False
+        self._error = ""
+        self._hold_until = 0.0
+        self._listeners: list = []
+        self._idle_proxy = None
+        self._brightness_proxy = None
+        self._brightness_monitor = None
+        self._load()
+        if self.available:
+            self._watch_brightness()
+        if self.available and self._read_brightness() != (0 if self._blanked else self.level):
+            self._write(self.level)
+        GLib.timeout_add_seconds(1, self._poll)
+
+    @property
+    def available(self) -> bool:
+        return self.led_path is not None and self.max_brightness > 0
+
+    def add_listener(self, callback) -> None:
+        if callback not in self._listeners:
+            self._listeners.append(callback)
+
+    def remove_listener(self, callback) -> None:
+        if callback in self._listeners:
+            self._listeners.remove(callback)
+
+    def set_level(self, level: int) -> None:
+        if not self.available:
+            return
+        level = max(0, min(self.max_brightness, int(level)))
+        self._blanked = False
+        ok, err = self._write(level)
+        if ok:
+            self.level = level
+            self._error = ""
+            self._save()
+        else:
+            self._error = err or "Could not change the keyboard backlight."
+        self._emit()
+
+    def refresh_from_hardware(self) -> None:
+        if not self.available:
+            return
+        current = self._read_brightness()
+        if current is None:
+            return
+        if self._blanked and self.level > 0 and current == 0:
+            return
+        if current > 0:
+            self.level = min(self.max_brightness, current)
+            self._blanked = False
+        elif not self._blanked:
+            self.level = 0
+        self._save()
+        self._emit()
+
+    def set_timeout(self, seconds: int) -> None:
+        self.timeout_sec = max(0, int(seconds))
+        self._save()
+        if self.timeout_sec <= 0 and self._blanked and self.level > 0:
+            self._blanked = False
+            ok, err = self._write(self.level)
+            self._error = "" if ok else err
+        self._emit()
+
+    def status_line(self) -> str:
+        if not self.available:
+            return "No keyboard backlight was found."
+        if self._error:
+            return self._error
+        name = kbd_level_name(self.level, self.max_brightness)
+        if self.level <= 0:
+            return "Backlight is off."
+        if self._blanked:
+            return f"Off until you use the computer. It returns to {name}."
+        if self.timeout_sec <= 0:
+            return f"{name}. Stays on."
+        return f"{name}. Turns off after {kbd_timeout_name(self.timeout_sec).lower()} of no use."
+
+    def _emit(self) -> None:
+        for callback in list(self._listeners):
+            callback()
+
+    def _load(self) -> None:
+        current = self._read_brightness()
+        self.level = current if current and current > 0 else min(self.max_brightness, 3) or 0
+        self.timeout_sec = 30
+        try:
+            data = json.loads(KBD_CONF.read_text())
+        except (OSError, json.JSONDecodeError, TypeError):
+            data = None
+        if isinstance(data, dict):
+            try:
+                self.level = int(data.get("brightness", self.level))
+            except (TypeError, ValueError):
+                pass
+            try:
+                self.timeout_sec = int(data.get("timeout", self.timeout_sec))
+            except (TypeError, ValueError):
+                pass
+        self.level = max(0, min(self.max_brightness or 0, self.level))
+        self.timeout_sec = max(0, self.timeout_sec)
+
+    def _save(self) -> None:
+        try:
+            KBD_CONF.parent.mkdir(parents=True, exist_ok=True)
+            KBD_CONF.write_text(
+                json.dumps({"brightness": self.level, "timeout": self.timeout_sec}, indent=2)
+            )
+        except OSError:
+            pass
+
+    def _read_max(self) -> int:
+        if self.led_path is None:
+            return 0
+        try:
+            return max(0, int((self.led_path / "max_brightness").read_text().strip()))
+        except (OSError, ValueError):
+            return 0
+
+    def _read_brightness(self) -> int | None:
+        if self.led_path is None:
+            return None
+        try:
+            return int((self.led_path / "brightness").read_text().strip())
+        except (OSError, ValueError):
+            return None
+
+    def _brightness_proxy_get(self):
+        if self._brightness_proxy is None:
+            bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+            self._brightness_proxy = Gio.DBusProxy.new_sync(
+                bus,
+                Gio.DBusProxyFlags.NONE,
+                None,
+                "org.freedesktop.login1",
+                "/org/freedesktop/login1/session/auto",
+                "org.freedesktop.login1.Session",
+                None,
+            )
+        return self._brightness_proxy
+
+    def _write(self, level: int) -> tuple[bool, str]:
+        if not self.available:
+            return False, "No keyboard backlight was found."
+        level = max(0, min(self.max_brightness, int(level)))
+        last_err = ""
+        for attempt in range(2):
+            try:
+                self._brightness_proxy_get().call_sync(
+                    "SetBrightness",
+                    GLib.Variant("(ssu)", ("leds", self.led_name, level)),
+                    Gio.DBusCallFlags.NONE,
+                    5000,
+                    None,
+                )
+                self._hold_until = time.monotonic() + 1.2
+                return True, ""
+            except GLib.Error as exc:
+                last_err = exc.message or "Could not change the keyboard backlight."
+                self._brightness_proxy = None
+        return False, last_err
+
+    def _watch_brightness(self) -> None:
+        if self.led_path is None or self._brightness_monitor is not None:
+            return
+        brightness_file = self.led_path / "brightness"
+        if not brightness_file.is_file():
+            return
+        try:
+            gfile = Gio.File.new_for_path(str(brightness_file))
+            self._brightness_monitor = gfile.monitor_file(Gio.FileMonitorFlags.NONE, None)
+            self._brightness_monitor.connect("changed", self._on_brightness_file_changed)
+        except GLib.Error:
+            self._brightness_monitor = None
+
+    def _on_brightness_file_changed(self, *_args) -> None:
+        if time.monotonic() < self._hold_until:
+            return
+        current = self._read_brightness()
+        if current is None:
+            return
+        expected = 0 if self._blanked else self.level
+        if current == expected:
+            return
+        if current > 0:
+            self.level = min(self.max_brightness, current)
+            self._blanked = False
+        elif not self._blanked:
+            self.level = 0
+        self._save()
+        self._emit()
+
+    def _idletime_ms(self) -> int | None:
+        try:
+            if self._idle_proxy is None:
+                bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+                self._idle_proxy = Gio.DBusProxy.new_sync(
+                    bus,
+                    Gio.DBusProxyFlags.DO_NOT_LOAD_PROPERTIES,
+                    None,
+                    "org.gnome.Shell",
+                    "/org/gnome/Mutter/IdleMonitor/Core",
+                    "org.gnome.Mutter.IdleMonitor",
+                    None,
+                )
+            result = self._idle_proxy.call_sync(
+                "GetIdletime",
+                None,
+                Gio.DBusCallFlags.NONE,
+                1000,
+                None,
+            )
+            return int(result.unpack()[0])
+        except (GLib.Error, TypeError, ValueError, IndexError):
+            self._idle_proxy = None
+            return None
+
+    def _poll(self) -> bool:
+        if not self.available:
+            return True
+        self._sync_hardware()
+        if self.level <= 0 or self.timeout_sec <= 0:
+            if self._blanked:
+                self._blanked = False
+                if self.level > 0:
+                    ok, err = self._write(self.level)
+                    self._error = "" if ok else err
+                self._emit()
+            return True
+        idle = self._idletime_ms()
+        if idle is None:
+            if not self._error:
+                self._error = "Backlight timer needs the GNOME session."
+                self._emit()
+            return True
+        if self._error == "Backlight timer needs the GNOME session.":
+            self._error = ""
+        if idle >= self.timeout_sec * 1000:
+            if not self._blanked:
+                ok, err = self._write(0)
+                if ok:
+                    self._blanked = True
+                    self._error = ""
+                else:
+                    self._error = err
+                self._emit()
+        elif self._blanked:
+            self._blanked = False
+            ok, err = self._write(self.level)
+            self._error = "" if ok else err
+            self._emit()
+        return True
+
+    def _sync_hardware(self) -> None:
+        if time.monotonic() < self._hold_until:
+            return
+        current = self._read_brightness()
+        if current is None:
+            return
+        expected = 0 if self._blanked else self.level
+        if current == expected:
+            return
+        if current > 0:
+            self.level = min(self.max_brightness, current)
+            self._blanked = False
+        elif not self._blanked:
+            self.level = 0
+        self._save()
+        self._emit()
+
+
+_KEYBOARD: KeyboardLight | None = None
+
+
+def get_keyboard() -> KeyboardLight:
+    global _KEYBOARD
+    if _KEYBOARD is None:
+        _KEYBOARD = KeyboardLight()
+    return _KEYBOARD
+
+
+def load_smooth_brightness_config() -> dict:
+    cfg = dict(SMOOTH_BRIGHTNESS_DEFAULTS)
+    try:
+        data = json.loads(SMOOTH_BRIGHTNESS_CONF.read_text())
+        if isinstance(data, dict):
+            for key in cfg:
+                if key in data:
+                    cfg[key] = data[key]
+    except (OSError, json.JSONDecodeError, TypeError):
+        pass
+    try:
+        cfg["ambient_bandwidth_hz"] = float(cfg["ambient_bandwidth_hz"])
+        cfg["brightness_time_constant_sec"] = float(cfg["brightness_time_constant_sec"])
+        cfg["tick_ms"] = int(cfg["tick_ms"])
+    except (TypeError, ValueError):
+        cfg = dict(SMOOTH_BRIGHTNESS_DEFAULTS)
+    cfg["ambient_bandwidth_hz"] = max(0.005, min(0.2, cfg["ambient_bandwidth_hz"]))
+    cfg["brightness_time_constant_sec"] = max(1.0, min(30.0, cfg["brightness_time_constant_sec"]))
+    cfg["tick_ms"] = max(50, min(500, cfg["tick_ms"]))
+    return cfg
+
+
+def save_smooth_brightness_config(data: dict) -> None:
+    cfg = load_smooth_brightness_config()
+    cfg["ambient_bandwidth_hz"] = max(
+        0.005, min(0.2, float(data.get("ambient_bandwidth_hz", cfg["ambient_bandwidth_hz"])))
+    )
+    cfg["brightness_time_constant_sec"] = max(
+        1.0, min(30.0, float(data.get("brightness_time_constant_sec", cfg["brightness_time_constant_sec"])))
+    )
+    cfg["tick_ms"] = max(50, min(500, int(data.get("tick_ms", cfg["tick_ms"]))))
+    SMOOTH_BRIGHTNESS_CONF.parent.mkdir(parents=True, exist_ok=True)
+    SMOOTH_BRIGHTNESS_CONF.write_text(json.dumps(cfg, indent=2))
+
+
+def read_ambient_brightness_enabled() -> bool:
+    try:
+        settings = Gio.Settings.new("org.gnome.settings-daemon.plugins.power")
+        return settings.get_boolean("ambient-enabled")
+    except GLib.Error:
+        return False
+
+
+def set_ambient_brightness_enabled(enabled: bool) -> bool:
+    try:
+        settings = Gio.Settings.new("org.gnome.settings-daemon.plugins.power")
+        settings.set_boolean("ambient-enabled", enabled)
+        return True
+    except GLib.Error:
+        return False
+
+
+def smooth_brightness_service_active() -> bool:
+    try:
+        proc = subprocess.run(
+            ["systemctl", "--user", "is-active", "smooth-adaptive-brightness.service"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+    return proc.stdout.strip() == "active"
+
+
+def restart_smooth_brightness_service() -> tuple[bool, str]:
+    if not SMOOTH_BRIGHTNESS_BIN.is_file():
+        return False, "Smooth brightness helper is not installed yet."
+    try:
+        proc = subprocess.run(
+            ["systemctl", "--user", "restart", "smooth-adaptive-brightness.service"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False, "Could not run systemctl."
+    if proc.returncode != 0:
+        msg = (proc.stderr or proc.stdout or "").strip()
+        return False, msg or "Failed to restart the smooth brightness service."
+    return True, "Smooth brightness settings applied."
+
+
+def smooth_brightness_install_script() -> Path | None:
+    here = Path(__file__).resolve().parent
+    for base in (here, Path.home() / "Projects/zorin-cpu-power"):
+        script = base / "smooth-adaptive-brightness" / "install.sh"
+        if script.is_file():
+            return script
+    share = Path.home() / ".local/share/zorin-cpu-power/smooth-adaptive-brightness/install.sh"
+    if share.is_file():
+        return share
+    return None
+
+
+def install_smooth_brightness_service() -> tuple[bool, str]:
+    script = smooth_brightness_install_script()
+    if script is None:
+        return False, "Install script for smooth brightness was not found."
+    try:
+        proc = subprocess.run(
+            ["/bin/bash", str(script)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            cwd=str(script.parent),
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False, "Install timed out."
+    out = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    if proc.returncode != 0:
+        return False, out or "Install failed."
+    return True, out or "Smooth brightness service installed."
+
+
+def format_smooth_brightness_status() -> str:
+    parts = []
+    if smooth_brightness_service_active():
+        parts.append("Smooth brightness service: running")
+    elif SMOOTH_BRIGHTNESS_BIN.is_file():
+        parts.append("Smooth brightness service: not running")
+    else:
+        parts.append("Smooth brightness service: not installed")
+    parts.append(
+        "Automatic brightness (Settings): "
+        + ("on" if read_ambient_brightness_enabled() else "off")
+    )
+    return "   ·   ".join(parts)
+
+
 class ControlWindow(Gtk.Window):
     NAV = (
         ("Dashboard", "dashboard"),
         ("CPU", "cpu"),
         ("Battery", "battery"),
+        ("Display · Beta", "display"),
+        ("Keyboard", "keyboard"),
         ("Memory", "memory"),
         ("Rules", "rules"),
         ("Scheduler", "scheduler"),
@@ -2370,7 +3296,10 @@ class ControlWindow(Gtk.Window):
 
         self.profile_tiles = ProfileTiles(read_samsung_mode(), self._on_profile_pick)
         self._plat_last = read_platform_profile()
+        self._plat_cool = False
         self._plat_ts = 0.0
+        self._tick_id = 0
+        self._adaptive_armed = False
         self.turbo_choice = TurboControl(read_turbo_override(), self._on_turbo_pick)
         self.gauge = RingGauge()
         self.chart = LineChart()
@@ -2435,11 +3364,29 @@ class ControlWindow(Gtk.Window):
         root.pack_start(self._build_sidebar(), False, False, 0)
         root.pack_start(main, True, True, 0)
         self.add(root)
+        self.connect("delete-event", self._on_delete_hide)
         self.show_all()
         self._show_page("dashboard")
         self.refresh_status()
         self._sync_daemon_banner(force=not is_auto_cpufreq_daemon_active())
-        GLib.timeout_add_seconds(2, self._tick)
+        self._start_live_updates()
+
+    def _on_delete_hide(self, *_args) -> bool:
+        self._stop_live_updates()
+        self.hide()
+        return True
+
+    def _start_live_updates(self) -> None:
+        if self._tick_id:
+            return
+        self._adaptive_armed = False
+        self._tick_id = GLib.timeout_add_seconds(2, self._tick)
+
+    def _stop_live_updates(self) -> None:
+        if self._tick_id:
+            GLib.source_remove(self._tick_id)
+            self._tick_id = 0
+        self._adaptive_armed = False
 
     def _build_sidebar(self) -> Gtk.Box:
         side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
@@ -2474,6 +3421,77 @@ class ControlWindow(Gtk.Window):
                 ctx.add_class("active")
             else:
                 ctx.remove_class("active")
+        if key == "keyboard" and hasattr(self, "kbd_scale"):
+            get_keyboard().refresh_from_hardware()
+            self._sync_kbd_ui()
+        if key == "display" and hasattr(self, "display_status"):
+            self._sync_display_ui()
+
+    def _sync_display_ui(self) -> None:
+        if not hasattr(self, "display_status"):
+            return
+        cfg = load_smooth_brightness_config()
+        self._updating = True
+        try:
+            self.display_ambient.set_active(read_ambient_brightness_enabled())
+            self.display_fade.set_value(cfg["brightness_time_constant_sec"])
+            self.display_fade_val.set_text(f"{cfg['brightness_time_constant_sec']:.1f} s")
+            self.display_ambient_smooth.set_value(cfg["ambient_bandwidth_hz"])
+            self.display_ambient_val.set_text(f"{cfg['ambient_bandwidth_hz']:.3f} Hz")
+            self.display_status.set_text(format_smooth_brightness_status())
+            installed = SMOOTH_BRIGHTNESS_BIN.is_file()
+            self.display_install_btn.set_visible(not installed)
+            self.display_apply_btn.set_sensitive(installed)
+        finally:
+            self._updating = False
+
+    def _on_display_ambient(self, switch: Gtk.Switch, _pspec) -> None:
+        if self._updating:
+            return
+        if not set_ambient_brightness_enabled(switch.get_active()):
+            self._updating = True
+            switch.set_active(not switch.get_active())
+            self._updating = False
+            self._set_status("Could not change automatic brightness in Settings.")
+            return
+        self._sync_display_ui()
+
+    def _on_display_fade(self, scale: Gtk.Scale) -> None:
+        if self._updating:
+            return
+        self.display_fade_val.set_text(f"{scale.get_value():.1f} s")
+
+    def _on_display_ambient_smooth(self, scale: Gtk.Scale) -> None:
+        if self._updating:
+            return
+        self.display_ambient_val.set_text(f"{scale.get_value():.3f} Hz")
+
+    def _on_apply_display_smooth(self, _btn: Gtk.Button) -> None:
+        save_smooth_brightness_config({
+            "brightness_time_constant_sec": self.display_fade.get_value(),
+            "ambient_bandwidth_hz": self.display_ambient_smooth.get_value(),
+            "tick_ms": load_smooth_brightness_config()["tick_ms"],
+        })
+        ok, msg = restart_smooth_brightness_service()
+        self._sync_display_ui()
+        self._set_status(msg)
+
+    def _on_install_display_smooth(self, _btn: Gtk.Button) -> None:
+        self.display_install_btn.set_sensitive(False)
+        self._set_status("Installing smooth brightness service…")
+
+        def runner() -> None:
+            result = install_smooth_brightness_service()
+
+            def finish() -> bool:
+                self.display_install_btn.set_sensitive(True)
+                self._sync_display_ui()
+                self._set_status(result[1])
+                return False
+
+            GLib.idle_add(finish)
+
+        threading.Thread(target=runner, daemon=True).start()
 
     def _page_shell(self, title: str, subtitle: str) -> tuple[Gtk.ScrolledWindow, Gtk.Box]:
         outer = Gtk.ScrolledWindow()
@@ -2641,7 +3659,10 @@ class ControlWindow(Gtk.Window):
         return outer
 
     def _page_battery(self) -> Gtk.Widget:
-        outer, box = self._page_shell("Battery", "Charge level, health, and charge limit.")
+        outer, box = self._page_shell(
+            "Battery",
+            "Charge level, health, charge limit, and the panel battery icon color for each mode.",
+        )
         card = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
         card.get_style_context().add_class("cpu-card")
         card.set_border_width(14)
@@ -2683,7 +3704,304 @@ class ControlWindow(Gtk.Window):
         self.limit_label.get_style_context().add_class("cpu-limit-active")
         limit.pack_start(self.limit_label, False, False, 0)
         box.pack_start(limit, False, False, 0)
+        box.pack_start(self._battery_icon_card(), False, False, 0)
         return outer
+
+    def _battery_icon_card(self) -> Gtk.Box:
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        card.get_style_context().add_class("cpu-card")
+        card.set_border_width(14)
+        card.pack_start(
+            Gtk.Label(label="Battery icon color", halign=Gtk.Align.START),
+            False,
+            False,
+            0,
+        )
+        card.pack_start(
+            Gtk.Label(
+                label="The panel battery icon takes the color of the mode you are in. Turn a mode off to leave the icon at its normal color.",
+                wrap=True,
+                halign=Gtk.Align.START,
+            ),
+            False,
+            False,
+            0,
+        )
+        settings = load_battery_icon()
+        self._icon_color_rows: dict[str, tuple[Gtk.ColorButton, Gtk.Switch]] = {}
+        for key, label, default in BATTERY_ICON_MODES:
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+            name = Gtk.Label(label=label, halign=Gtk.Align.START, hexpand=True)
+            rgba = Gdk.RGBA()
+            rgba.parse(settings[key]["color"])
+            color = Gtk.ColorButton.new_with_rgba(rgba)
+            color.set_use_alpha(False)
+            color.set_tooltip_text(f"{label} color")
+            color.set_sensitive(settings[key]["enabled"])
+            color.connect("color-set", self._on_battery_icon_color, key)
+            reset = Gtk.Button()
+            reset.set_image(Gtk.Image.new_from_icon_name("view-refresh-symbolic", Gtk.IconSize.BUTTON))
+            reset.set_relief(Gtk.ReliefStyle.NONE)
+            reset.set_tooltip_text("Reset color")
+            reset.connect("clicked", self._on_battery_icon_reset, key, default)
+            switch = Gtk.Switch(valign=Gtk.Align.CENTER)
+            switch.set_active(settings[key]["enabled"])
+            switch.set_tooltip_text(f"Color the icon in {label}")
+            switch.connect("notify::active", self._on_battery_icon_enabled, key)
+            row.pack_start(name, True, True, 0)
+            row.pack_start(color, False, False, 0)
+            row.pack_start(reset, False, False, 0)
+            row.pack_start(switch, False, False, 0)
+            card.pack_start(row, False, False, 0)
+            self._icon_color_rows[key] = (color, switch)
+        return card
+
+    def _on_battery_icon_color(self, _button: Gtk.ColorButton, key: str) -> None:
+        if self._updating:
+            return
+        self._save_battery_icon_rows()
+
+    def _on_battery_icon_enabled(self, switch: Gtk.Switch, _pspec, key: str) -> None:
+        if self._updating or key not in self._icon_color_rows:
+            return
+        color, _switch = self._icon_color_rows[key]
+        color.set_sensitive(switch.get_active())
+        self._save_battery_icon_rows()
+
+    def _on_battery_icon_reset(self, _button: Gtk.Button, key: str, default: str) -> None:
+        color, _switch = self._icon_color_rows[key]
+        rgba = Gdk.RGBA()
+        rgba.parse(default)
+        self._updating = True
+        try:
+            color.set_rgba(rgba)
+        finally:
+            self._updating = False
+        self._save_battery_icon_rows()
+
+    def _save_battery_icon_rows(self) -> None:
+        settings = load_battery_icon()
+        for key, (color, switch) in self._icon_color_rows.items():
+            settings[key]["color"] = rgba_to_hex(color.get_rgba())
+            settings[key]["enabled"] = switch.get_active()
+        save_battery_icon(settings)
+
+    def _page_display(self) -> Gtk.Widget:
+        cfg = load_smooth_brightness_config()
+        outer, box = self._page_shell(
+            "Display",
+            "Experimental smooth auto brightness (separate login service). Behavior may change.",
+        )
+        auto_section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        section_head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        section_title = Gtk.Label(label="Auto brightness service", halign=Gtk.Align.START)
+        section_title.get_style_context().add_class("cpu-card-title")
+        beta_badge = Gtk.Label(label="BETA")
+        beta_badge.get_style_context().add_class("cpu-beta-badge")
+        beta_badge.set_valign(Gtk.Align.CENTER)
+        section_head.pack_start(section_title, False, False, 0)
+        section_head.pack_start(beta_badge, False, False, 0)
+        auto_section.pack_start(section_head, False, False, 0)
+
+        status_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        status_card.get_style_context().add_class("cpu-card")
+        status_card.set_border_width(14)
+        self.display_status = Gtk.Label(halign=Gtk.Align.START)
+        self.display_status.get_style_context().add_class("cpu-card-desc")
+        self.display_status.set_line_wrap(True)
+        status_card.pack_start(self.display_status, False, False, 0)
+        amb_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        amb_lbl = Gtk.Label(label="Automatic brightness", halign=Gtk.Align.START)
+        amb_lbl.get_style_context().add_class("cpu-form-label")
+        self.display_ambient = Gtk.Switch()
+        self.display_ambient.set_valign(Gtk.Align.CENTER)
+        self.display_ambient.set_active(read_ambient_brightness_enabled())
+        self.display_ambient.connect("notify::active", self._on_display_ambient)
+        amb_row.pack_start(amb_lbl, True, True, 0)
+        amb_row.pack_start(self.display_ambient, False, False, 0)
+        status_card.pack_start(amb_row, False, False, 0)
+        status_card.pack_start(
+            Gtk.Label(
+                label="Uses the same toggle as Zorin Settings. The smooth brightness service must be running.",
+                wrap=True,
+                halign=Gtk.Align.START,
+            ),
+            False,
+            False,
+            0,
+        )
+        self.display_install_btn = Gtk.Button(label="Install smooth brightness service")
+        self.display_install_btn.get_style_context().add_class("cpu-apply-btn")
+        self.display_install_btn.set_halign(Gtk.Align.START)
+        self.display_install_btn.connect("clicked", self._on_install_display_smooth)
+        status_card.pack_start(self.display_install_btn, False, False, 0)
+
+        fade_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        fade_card.get_style_context().add_class("cpu-card")
+        fade_card.set_border_width(14)
+        fade_card.pack_start(Gtk.Label(label="Screen fade duration", halign=Gtk.Align.START), False, False, 0)
+        fade_card.pack_start(
+            Gtk.Label(
+                label="How long the display takes to reach a new brightness level. Higher feels calmer.",
+                wrap=True,
+                halign=Gtk.Align.START,
+            ),
+            False,
+            False,
+            0,
+        )
+        fade_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.display_fade = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 1.0, 20.0, 0.5)
+        self.display_fade.set_value(cfg["brightness_time_constant_sec"])
+        self.display_fade.set_digits(1)
+        self.display_fade.set_hexpand(True)
+        self.display_fade.get_style_context().add_class("cpu-combo")
+        self.display_fade.connect("value-changed", self._on_display_fade)
+        self.display_fade_val = Gtk.Label(label=f"{cfg['brightness_time_constant_sec']:.1f} s")
+        fade_row.pack_start(self.display_fade, True, True, 0)
+        fade_row.pack_start(self.display_fade_val, False, False, 0)
+        fade_card.pack_start(fade_row, False, False, 0)
+
+        amb_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        amb_card.get_style_context().add_class("cpu-card")
+        amb_card.set_border_width(14)
+        amb_card.pack_start(Gtk.Label(label="Room light response", halign=Gtk.Align.START), False, False, 0)
+        amb_card.pack_start(
+            Gtk.Label(
+                label="How quickly auto brightness reacts to the ambient sensor. Lower values change more gently.",
+                wrap=True,
+                halign=Gtk.Align.START,
+            ),
+            False,
+            False,
+            0,
+        )
+        amb_srow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.display_ambient_smooth = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0.01, 0.12, 0.005)
+        self.display_ambient_smooth.set_value(cfg["ambient_bandwidth_hz"])
+        self.display_ambient_smooth.set_digits(3)
+        self.display_ambient_smooth.set_hexpand(True)
+        self.display_ambient_smooth.get_style_context().add_class("cpu-combo")
+        self.display_ambient_smooth.connect("value-changed", self._on_display_ambient_smooth)
+        self.display_ambient_val = Gtk.Label(label=f"{cfg['ambient_bandwidth_hz']:.3f} Hz")
+        amb_srow.pack_start(self.display_ambient_smooth, True, True, 0)
+        amb_srow.pack_start(self.display_ambient_val, False, False, 0)
+        amb_card.pack_start(amb_srow, False, False, 0)
+        self.display_apply_btn = Gtk.Button(label="Apply display smoothing")
+        self.display_apply_btn.get_style_context().add_class("cpu-apply-btn")
+        self.display_apply_btn.set_halign(Gtk.Align.START)
+        self.display_apply_btn.connect("clicked", self._on_apply_display_smooth)
+        amb_card.pack_start(self.display_apply_btn, False, False, 0)
+        auto_section.pack_start(status_card, False, False, 0)
+        auto_section.pack_start(fade_card, False, False, 0)
+        auto_section.pack_start(amb_card, False, False, 0)
+        box.pack_start(auto_section, False, False, 0)
+        self._sync_display_ui()
+        return outer
+
+    def _page_keyboard(self) -> Gtk.Widget:
+        kbd = get_keyboard()
+        outer, box = self._page_shell(
+            "Keyboard",
+            "Keyboard backlight brightness, and how long it stays on after you stop using the computer.",
+        )
+        bright = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        bright.get_style_context().add_class("cpu-card")
+        bright.set_border_width(14)
+        bright.pack_start(Gtk.Label(label="Brightness", halign=Gtk.Align.START), False, False, 0)
+        bright.pack_start(
+            Gtk.Label(
+                label="Off, low, medium, or high. Matches the keyboard backlight key on your Galaxy Book.",
+                wrap=True,
+                halign=Gtk.Align.START,
+            ),
+            False,
+            False,
+            0,
+        )
+        maximum = max(1, kbd.max_brightness)
+        self.kbd_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, maximum, 1)
+        self.kbd_scale.set_digits(0)
+        self.kbd_scale.set_hexpand(True)
+        self.kbd_scale.set_value(kbd.level if kbd.available else 0)
+        self.kbd_scale.get_style_context().add_class("cpu-combo")
+        names = {0: "Off", 1: "Low", 2: "Medium", 3: "High"}
+        for step in range(maximum + 1):
+            self.kbd_scale.add_mark(
+                step,
+                Gtk.PositionType.BOTTOM,
+                names.get(step, str(step)),
+            )
+        self.kbd_scale.connect("value-changed", self._on_kbd_brightness)
+        self.kbd_scale.set_sensitive(kbd.available)
+        bright.pack_start(self.kbd_scale, False, False, 0)
+        box.pack_start(bright, False, False, 0)
+
+        timer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        timer.get_style_context().add_class("cpu-card")
+        timer.set_border_width(14)
+        timer.pack_start(Gtk.Label(label="Turn off after", halign=Gtk.Align.START), False, False, 0)
+        timer.pack_start(
+            Gtk.Label(
+                label="The light turns off after this long with no keyboard or mouse use, then comes back when you use the computer.",
+                wrap=True,
+                halign=Gtk.Align.START,
+            ),
+            False,
+            False,
+            0,
+        )
+        presets = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self._kbd_timeout_buttons: dict[int, Gtk.Button] = {}
+        for seconds, label in KBD_TIMEOUTS:
+            btn = Gtk.Button(label=label)
+            btn.get_style_context().add_class("preset-btn")
+            btn.set_sensitive(kbd.available)
+            btn.connect("clicked", self._on_kbd_timeout, seconds)
+            presets.pack_start(btn, False, False, 0)
+            self._kbd_timeout_buttons[seconds] = btn
+        timer.pack_start(presets, False, False, 0)
+        self.kbd_status = Gtk.Label(halign=Gtk.Align.START)
+        self.kbd_status.set_line_wrap(True)
+        self.kbd_status.get_style_context().add_class("cpu-limit-active")
+        timer.pack_start(self.kbd_status, False, False, 0)
+        box.pack_start(timer, False, False, 0)
+        kbd.add_listener(self._on_kbd_external)
+        self.connect("destroy", self._on_kbd_window_destroy)
+        self._sync_kbd_ui()
+        return outer
+
+    def _on_kbd_window_destroy(self, _widget) -> None:
+        get_keyboard().remove_listener(self._on_kbd_external)
+
+    def _on_kbd_brightness(self, scale: Gtk.Scale) -> None:
+        if self._updating:
+            return
+        get_keyboard().set_level(int(round(scale.get_value())))
+
+    def _on_kbd_timeout(self, _btn: Gtk.Button, seconds: int) -> None:
+        get_keyboard().set_timeout(seconds)
+
+    def _on_kbd_external(self) -> None:
+        self._sync_kbd_ui()
+
+    def _sync_kbd_ui(self) -> None:
+        if not hasattr(self, "kbd_scale"):
+            return
+        kbd = get_keyboard()
+        self._updating = True
+        try:
+            if int(round(self.kbd_scale.get_value())) != kbd.level:
+                self.kbd_scale.set_value(kbd.level)
+            for seconds, btn in self._kbd_timeout_buttons.items():
+                ctx = btn.get_style_context()
+                if seconds == kbd.timeout_sec:
+                    ctx.add_class("selected")
+                else:
+                    ctx.remove_class("selected")
+            self.kbd_status.set_text(kbd.status_line())
+        finally:
+            self._updating = False
 
     def _page_memory(self) -> Gtk.Widget:
         outer, box = self._page_shell(
@@ -3023,12 +4341,51 @@ class ControlWindow(Gtk.Window):
 
     def _page_settings(self) -> Gtk.Widget:
         outer, box = self._page_shell("Settings", "Daemon and how this app applies changes.")
+        password_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        password_card.get_style_context().add_class("cpu-card")
+        password_card.set_border_width(14)
+        password_card.pack_start(
+            Gtk.Label(label="Login password", halign=Gtk.Align.START),
+            False,
+            False,
+            0,
+        )
+        password_card.pack_start(
+            Gtk.Label(
+                label="Enter your login password once. Every CPU, fan, turbo, charge, and memory change then applies by itself. If you change that password later, enter the new one here.",
+                wrap=True,
+                halign=Gtk.Align.START,
+            ),
+            False,
+            False,
+            0,
+        )
+        self.admin_pass = Gtk.Entry()
+        self.admin_pass.set_visibility(False)
+        self.admin_pass.set_placeholder_text("Login password")
+        self.admin_pass.set_hexpand(True)
+        self.admin_pass.connect("activate", self._on_save_admin_password)
+        self.admin_pass_status = Gtk.Label(halign=Gtk.Align.START)
+        self.admin_pass_status.get_style_context().add_class("cpu-limit-active")
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        save_pw = Gtk.Button(label="Save password")
+        save_pw.get_style_context().add_class("cpu-apply-btn")
+        save_pw.connect("clicked", self._on_save_admin_password)
+        forget_pw = Gtk.Button(label="Forget")
+        forget_pw.connect("clicked", self._on_forget_admin_password)
+        row.pack_start(self.admin_pass, True, True, 0)
+        row.pack_start(save_pw, False, False, 0)
+        row.pack_start(forget_pw, False, False, 0)
+        password_card.pack_start(row, False, False, 0)
+        password_card.pack_start(self.admin_pass_status, False, False, 0)
+        box.pack_start(password_card, False, False, 0)
+        self._refresh_admin_password_status()
+
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         card.get_style_context().add_class("cpu-card")
         card.set_border_width(14)
         note = Gtk.Label(
-            label="Opening this window does not need a password. Applying CPU, memory, turbo, charge limit, or rules does. "
-            "Re-run install-system-helper.sh once after updating so memory controls work. "
+            label="If no password is saved, applying a change asks once in the system dialog. "
             "If profiles say the daemon is not running, repair it below.",
             wrap=True,
             halign=Gtk.Align.START,
@@ -3043,6 +4400,38 @@ class ControlWindow(Gtk.Window):
         card.pack_start(self._bind("settings_host", ""), False, False, 0)
         box.pack_start(card, False, False, 0)
         return outer
+
+    def _refresh_admin_password_status(self) -> None:
+        if not hasattr(self, "admin_pass_status"):
+            return
+        if admin_password_saved():
+            self.admin_pass_status.set_text("Password saved. Changes apply without asking.")
+            self.admin_pass.set_placeholder_text("Enter a new password to replace it")
+        else:
+            self.admin_pass_status.set_text("No password saved. Changes will ask.")
+            self.admin_pass.set_placeholder_text("Login password")
+
+    def _on_save_admin_password(self, *_args) -> None:
+        password = self.admin_pass.get_text()
+        self.admin_pass.set_text("")
+        if not password:
+            self._set_status("Enter your login password.")
+            return
+
+        def done(ok: bool, msg: str) -> None:
+            self._set_status(msg)
+            self._refresh_admin_password_status()
+
+        if not schedule_apply(lambda: save_admin_password(password), done):
+            self._set_status("A password dialog is already open. Finish that first.")
+
+    def _on_forget_admin_password(self, _btn: Gtk.Button) -> None:
+        def done(ok: bool, msg: str) -> None:
+            self._set_status(msg)
+            self._refresh_admin_password_status()
+
+        if not schedule_apply(forget_admin_password, done):
+            self._set_status("A password dialog is already open. Finish that first.")
 
     def _quick_profile(self, mode: str) -> None:
         previous = self.profile_tiles.current
@@ -3074,6 +4463,8 @@ class ControlWindow(Gtk.Window):
         self._plat_ts = 0.0
 
     def _tick(self) -> bool:
+        if not self.get_visible():
+            return True
         self.live = read_live()
         try:
             import psutil
@@ -3249,29 +4640,43 @@ class ControlWindow(Gtk.Window):
         if now - self._plat_ts < 20:
             return
         load = float(self.live.get("cpu_pct") or 0)
+        temp = self.live.get("temp")
         choice = platform_for_rule(
             rule,
             load,
-            self.live.get("temp"),
+            temp,
             bool(self.live.get("plugged")),
             self._plat_last,
         )
-        if choice == self._plat_last or choice == read_platform_profile():
+        cooling = cooling_hold(choice, load, temp, self._plat_last)
+        if not self._adaptive_armed:
+            self._adaptive_armed = True
+            if not cooling:
+                self._plat_last = choice
+                self._plat_ts = now
+                return
+        if choice == self._plat_last and cooling == self._plat_cool:
+            return
+        if choice == read_platform_profile() and not cooling and not self._plat_cool:
             self._plat_last = choice
             return
         self._plat_ts = now
         previous = self._plat_last
+        previous_cool = self._plat_cool
         self._plat_last = choice
+        self._plat_cool = cooling
 
         def done(ok: bool, msg: str) -> None:
             if ok:
                 self._set_status(f"{source}: {POWER_RULE_LABELS.get(rule, rule)} · {msg}")
             else:
                 self._plat_last = previous
+                self._plat_cool = previous_cool
                 self._set_status(msg)
 
-        if not schedule_apply(lambda: apply_platform_choice(choice), done):
+        if not schedule_apply(lambda: apply_platform_choice(choice, cooling), done):
             self._plat_last = previous
+            self._plat_cool = previous_cool
 
     def _set_status(self, msg: str) -> None:
         self.toast.set_text(msg)
@@ -3486,7 +4891,16 @@ class CpuPowerApp(Gtk.Application):
         )
         self.window: ControlWindow | None = None
         self.indicator = None
+        self.xapp_icon = None
         self.tray_popup: TrayPopupWindow | None = None
+        self._tray_menu: Gtk.Menu | None = None
+        self._tray_status_item: Gtk.MenuItem | None = None
+        self._profile_items: dict[str, Gtk.RadioMenuItem] = {}
+        self._turbo_items: dict[str, Gtk.RadioMenuItem] = {}
+        self._charge_items: dict[int, Gtk.RadioMenuItem] = {}
+        self._charge_root: Gtk.MenuItem | None = None
+        self._charge_none: Gtk.RadioMenuItem | None = None
+        self._tray_updating = False
         self._tray_ok = False
         self._services_ready = False
 
@@ -3510,10 +4924,18 @@ class CpuPowerApp(Gtk.Application):
             return
         self._services_ready = True
         try:
+            save_battery_icon(load_battery_icon())
+        except OSError:
+            pass
+        try:
+            get_keyboard()
+        except Exception:
+            pass
+        try:
             ensure_tray_icon()
         except (OSError, cairo.Error):
             pass
-        self.tray_popup = TrayPopupWindow(self)
+        self._build_tray_menu()
         self._tray_ok = self._build_tray()
         if self._tray_ok:
             self.hold()
@@ -3530,12 +4952,27 @@ class CpuPowerApp(Gtk.Application):
         self.window.set_decorated(True)
         self.window.present()
         self.window.deiconify()
+        self.window._start_live_updates()
         self.window.refresh_status()
 
     def _on_window_destroy(self, _widget) -> None:
         self.window = None
         if not self._tray_ok:
             self.quit()
+
+    def _quit_from_tray(self) -> None:
+        if self.window is not None:
+            if hasattr(self.window, "_stop_live_updates"):
+                self.window._stop_live_updates()
+            try:
+                self.remove_window(self.window)
+            except GLib.Error:
+                pass
+            self.window.destroy()
+            self.window = None
+        if self.tray_popup is not None:
+            self.tray_popup.hide()
+        self.quit()
 
     def _on_changed(self) -> None:
         self._sync_tray()
@@ -3545,42 +4982,231 @@ class CpuPowerApp(Gtk.Application):
     def _sync_tray(self) -> None:
         if self.tray_popup and self.tray_popup.get_visible():
             self.tray_popup.refresh()
+        self._sync_tray_menu()
 
-    def _show_tray_popup(self) -> bool:
-        if self.tray_popup:
-            self.tray_popup.present_near_tray()
-        return False
+    def _build_tray_menu(self) -> None:
+        menu = Gtk.Menu()
+        menu.get_style_context().add_class("tray-menu")
+        status = Gtk.MenuItem(label="CPU Power")
+        status.set_sensitive(False)
+        menu.append(status)
+        self._tray_status_item = status
+        menu.append(Gtk.SeparatorMenuItem())
 
-    def _on_tray_menu_open(self, menu: Gtk.Menu) -> None:
-        menu.hide()
-        GLib.idle_add(self._show_tray_popup)
+        first = None
+        for mode, label in (
+            ("adaptive", "Adaptive"),
+            ("silent", "Silent"),
+            ("quiet", "Quiet"),
+            ("balance", "Balance"),
+            ("power", "Power"),
+        ):
+            if first is None:
+                item = Gtk.RadioMenuItem.new_with_label([], label)
+                first = item
+            else:
+                item = Gtk.RadioMenuItem.new_with_label_from_widget(first, label)
+            item.connect("toggled", self._on_tray_profile, mode)
+            menu.append(item)
+            self._profile_items[mode] = item
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        turbo_root = Gtk.MenuItem(label="Turbo")
+        turbo_menu = Gtk.Menu()
+        turbo_root.set_submenu(turbo_menu)
+        first = None
+        for mode, label in (("auto", "Auto"), ("never", "Off"), ("always", "On")):
+            if first is None:
+                item = Gtk.RadioMenuItem.new_with_label([], label)
+                first = item
+            else:
+                item = Gtk.RadioMenuItem.new_with_label_from_widget(first, label)
+            item.connect("toggled", self._on_tray_turbo, mode)
+            turbo_menu.append(item)
+            self._turbo_items[mode] = item
+        menu.append(turbo_root)
+
+        charge_root = Gtk.MenuItem(label="Charge limit")
+        charge_menu = Gtk.Menu()
+        charge_root.set_submenu(charge_menu)
+        self._charge_root = charge_root
+        none_item = Gtk.RadioMenuItem.new_with_label([], "")
+        none_item.set_no_show_all(True)
+        charge_menu.append(none_item)
+        self._charge_none = none_item
+        first = none_item
+        for pct, label in ((100, "Off"), (90, "90%"), (80, "80%"), (70, "70%"), (60, "60%"), (50, "50%")):
+            item = Gtk.RadioMenuItem.new_with_label_from_widget(first, label)
+            item.connect("toggled", self._on_tray_charge, pct)
+            charge_menu.append(item)
+            self._charge_items[pct] = item
+        menu.append(charge_root)
+
+        menu.append(Gtk.SeparatorMenuItem())
+        open_item = Gtk.MenuItem(label="Open app")
+        open_item.connect("activate", lambda *_: self._present_window())
+        menu.append(open_item)
+        quit_item = Gtk.MenuItem(label="Quit")
+        quit_item.connect("activate", lambda *_: self._quit_from_tray())
+        menu.append(quit_item)
+
+        menu.connect("show", lambda *_: self._sync_tray_menu())
+        menu.show_all()
+        none_item.hide()
+        self._tray_menu = menu
+        self._sync_tray_menu()
+
+    def _sync_tray_menu(self) -> None:
+        if self._tray_menu is None or self._tray_status_item is None:
+            return
+        live = read_live()
+        bits = ["Running" if is_auto_cpufreq_daemon_active() else "Daemon off"]
+        if live.get("freq_ghz"):
+            bits.append(f"{live['freq_ghz']:.1f} GHz")
+        if live.get("temp") is not None:
+            bits.append(f"{live['temp']:.0f}°")
+        self._tray_updating = True
+        self._tray_status_item.set_label("  ·  ".join(bits))
+        mode = read_samsung_mode()
+        for key, item in self._profile_items.items():
+            item.set_active(key == mode)
+        turbo = read_turbo_override()
+        for key, item in self._turbo_items.items():
+            item.set_active(key == turbo)
+        limit = read_charge_limit()
+        if self._charge_root is not None:
+            self._charge_root.set_sensitive(limit is not None)
+            if limit is None:
+                self._charge_root.set_label("Charge limit")
+            elif limit >= 100:
+                self._charge_root.set_label("Charge limit")
+            else:
+                self._charge_root.set_label(f"Charge limit · {limit}%")
+        matched = limit in self._charge_items if limit is not None else False
+        for pct, item in self._charge_items.items():
+            item.set_active(matched and pct == limit)
+        if not matched and self._charge_none is not None:
+            self._charge_none.set_active(True)
+        self._tray_updating = False
+
+    def _on_tray_profile(self, item: Gtk.RadioMenuItem, mode: str) -> None:
+        if self._tray_updating or not item.get_active() or read_samsung_mode() == mode:
+            return
+
+        def done(ok: bool, _msg: str) -> None:
+            self._sync_tray_menu()
+            if ok:
+                self._on_changed()
+
+        schedule_apply(lambda: run_profile(mode), done)
+
+    def _on_tray_turbo(self, item: Gtk.RadioMenuItem, mode: str) -> None:
+        if self._tray_updating or not item.get_active() or read_turbo_override() == mode:
+            return
+
+        def done(ok: bool, _msg: str) -> None:
+            self._sync_tray_menu()
+            if ok:
+                self._on_changed()
+
+        schedule_apply(lambda: run_turbo(mode), done)
+
+    def _on_tray_charge(self, item: Gtk.RadioMenuItem, pct: int) -> None:
+        if self._tray_updating or not item.get_active() or read_charge_limit() == pct:
+            return
+
+        def done(ok: bool, _msg: str) -> None:
+            self._sync_tray_menu()
+            if ok:
+                self._on_changed()
+
+        schedule_apply(lambda: set_charge_limit(pct), done)
 
     def _build_tray(self) -> bool:
+        try:
+            self._icon_path = str(ensure_tray_icon())
+        except (OSError, cairo.Error):
+            self._icon_path = str(TRAY_ICON if TRAY_ICON.is_file() else LOCAL_ICON)
+        if self._try_xapp_tray():
+            GLib.timeout_add(700, self._ayatana_if_xapp_missing)
+            return True
+        return self._build_ayatana_tray()
+
+    def _try_xapp_tray(self) -> bool:
+        try:
+            gi.require_version("XApp", "1.0")
+            from gi.repository import XApp
+        except (ValueError, ImportError):
+            return False
+        icon = XApp.StatusIcon.new()
+        icon.set_name(APP_ID)
+        icon.set_icon_name(self._icon_path)
+        icon.set_tooltip_text("CPU Power")
+        icon.connect("button-press-event", self._on_xapp_button)
+        icon.connect("state-changed", self._on_xapp_state)
+        self.xapp_icon = icon
+        return True
+
+    def _on_xapp_state(self, icon, state) -> None:
+        try:
+            gi.require_version("XApp", "1.0")
+            from gi.repository import XApp
+        except (ValueError, ImportError):
+            return
+        if state != XApp.StatusIconState.NO_SUPPORT:
+            return
+        if self.indicator is None:
+            self._build_ayatana_tray()
+
+    def _ayatana_if_xapp_missing(self) -> bool:
+        if self.indicator is not None or self.xapp_icon is None:
+            return False
+        try:
+            gi.require_version("XApp", "1.0")
+            from gi.repository import XApp
+        except (ValueError, ImportError):
+            self._build_ayatana_tray()
+            return False
+        if self.xapp_icon.get_state() == XApp.StatusIconState.NO_SUPPORT:
+            self._build_ayatana_tray()
+        return False
+
+    def _on_xapp_button(self, _icon, x: int, y: int, button: int, time: int, panel_position: int) -> None:
+        if button != 1:
+            self._present_window()
+            return
+        if self._tray_menu is None:
+            return
+        self._sync_tray_menu()
+
+        def place(menu, _x, _y, _data):
+            width, height = menu.get_size_request()
+            req = menu.get_preferred_size()[1]
+            mw = req.width or width or 180
+            mh = req.height or height or 220
+            px, py = int(x), int(y)
+            if int(panel_position) == 2:
+                return px, py, False
+            return px - mw // 2, py - mh, False
+
+        self._tray_menu.popup(None, None, place, None, button, time)
+
+    def _build_ayatana_tray(self) -> bool:
         try:
             gi.require_version("AyatanaAppIndicator3", "0.1")
             from gi.repository import AyatanaAppIndicator3 as AppIndicator
         except (ValueError, ImportError):
             return False
-
-        try:
-            icon_path = str(ensure_tray_icon())
-        except (OSError, cairo.Error):
-            icon_path = str(TRAY_ICON if TRAY_ICON.is_file() else LOCAL_ICON)
-
         self.indicator = AppIndicator.Indicator.new(
             APP_ID,
-            icon_path,
+            self._icon_path,
             AppIndicator.IndicatorCategory.APPLICATION_STATUS,
         )
-        menu = Gtk.Menu()
-        item = Gtk.MenuItem(label="CPU Power")
-        menu.append(item)
-        menu.connect("map", self._on_tray_menu_open)
-        menu.show_all()
-        self.indicator.set_menu(menu)
+        self.indicator.set_menu(self._tray_menu)
         self.indicator.set_title("CPU Power")
         if hasattr(self.indicator, "set_icon_full"):
-            self.indicator.set_icon_full(icon_path, "CPU Power")
+            self.indicator.set_icon_full(self._icon_path, "CPU Power")
         self.indicator.set_status(AppIndicator.IndicatorStatus.ACTIVE)
         return True
 

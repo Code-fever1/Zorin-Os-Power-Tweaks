@@ -21,6 +21,66 @@ usage() {
 
 [[ $# -ge 1 ]] || usage
 
+PROFILE="/sys/firmware/acpi/platform_profile"
+
+set_profile() {
+  [[ -f "$PROFILE" ]] || { echo "This laptop has no Samsung performance mode." >&2; exit 1; }
+  case "$1" in
+    low-power|quiet|balanced|performance) ;;
+    *) echo "Rejected platform profile: $1" >&2; exit 1 ;;
+  esac
+  echo "$1" >"$PROFILE"
+}
+
+# Writing performance while it is already selected does not refresh the fan curve.
+set_power_profile() {
+  [[ -f "$PROFILE" ]] || return 0
+  echo balanced >"$PROFILE" || true
+  sleep 0.15
+  echo performance >"$PROFILE"
+}
+
+cpu_floor() {
+  local mode="$1"
+  local pstate="/sys/devices/system/cpu/intel_pstate"
+  local cpu max min target epp
+  if [[ "$mode" == high ]]; then
+    echo 0 >"$pstate/no_turbo" 2>/dev/null || true
+    echo 100 >"$pstate/max_perf_pct" 2>/dev/null || true
+    echo 100 >"$pstate/min_perf_pct" 2>/dev/null || true
+  else
+    echo 100 >"$pstate/max_perf_pct" 2>/dev/null || true
+    echo 10 >"$pstate/min_perf_pct" 2>/dev/null || true
+  fi
+  for cpu in /sys/devices/system/cpu/cpu[0-9]*; do
+    [[ -f "$cpu/cpufreq/cpuinfo_max_freq" ]] || continue
+    max="$(cat "$cpu/cpufreq/cpuinfo_max_freq")"
+    min="$(cat "$cpu/cpufreq/cpuinfo_min_freq")"
+    if [[ "$mode" == high ]]; then
+      target="$max"
+      epp="performance"
+    else
+      target="$min"
+      epp="balance_performance"
+    fi
+    echo "$max" >"$cpu/cpufreq/scaling_max_freq" 2>/dev/null || true
+    echo "$target" >"$cpu/cpufreq/scaling_min_freq" 2>/dev/null || true
+    if [[ -f "$cpu/cpufreq/energy_performance_preference" ]]; then
+      echo "$epp" >"$cpu/cpufreq/energy_performance_preference" 2>/dev/null || true
+    fi
+  done
+}
+
+samsung_mode_is_power() {
+  local f mode
+  for f in /home/*/.config/zorin-cpu-power/samsung-mode; do
+    [[ -f "$f" ]] || continue
+    mode="$(tr -d '[:space:]' <"$f")"
+    [[ "$mode" == power ]] && return 0
+  done
+  return 1
+}
+
 case "$1" in
   auto-cpufreq)
     shift
@@ -44,7 +104,22 @@ case "$1" in
       esac
     done
     [[ "$allowed" -eq 1 ]] || usage
-    exec "$AUTO_CPUFREQ" "$@"
+    "$AUTO_CPUFREQ" "$@"
+    status=$?
+    for arg in "$@"; do
+      case "$arg" in
+        --turbo=always)
+          if samsung_mode_is_power; then
+            set_power_profile
+            cpu_floor high
+          fi
+          ;;
+        --turbo=auto|--turbo=never)
+          cpu_floor normal
+          ;;
+      esac
+    done
+    exit "$status"
     ;;
   set-charge)
     [[ $# -eq 2 ]] || usage
@@ -118,39 +193,36 @@ case "$1" in
     ;;
   samsung-mode)
     [[ $# -ge 2 ]] || usage
-    profile="/sys/firmware/acpi/platform_profile"
-    [[ -f "$profile" ]] || { echo "This laptop has no Samsung performance mode." >&2; exit 1; }
-    set_profile() {
-      case "$1" in
-        low-power|quiet|balanced|performance) ;;
-        *) echo "Rejected platform profile: $1" >&2; exit 1 ;;
-      esac
-      echo "$1" >"$profile"
-    }
+    [[ -f "$PROFILE" ]] || { echo "This laptop has no Samsung performance mode." >&2; exit 1; }
     case "$2" in
       silent)
         set_profile low-power
         "$AUTO_CPUFREQ" --force=powersave || true
         "$AUTO_CPUFREQ" --turbo=never || true
+        cpu_floor normal
         ;;
       quiet)
         set_profile quiet
         "$AUTO_CPUFREQ" --force=powersave || true
         "$AUTO_CPUFREQ" --turbo=auto || true
+        cpu_floor normal
         ;;
       balance)
         set_profile balanced
         "$AUTO_CPUFREQ" --force=reset || true
         "$AUTO_CPUFREQ" --turbo=auto || true
+        cpu_floor normal
         ;;
       power)
-        set_profile performance
+        set_power_profile
         "$AUTO_CPUFREQ" --force=performance || true
         "$AUTO_CPUFREQ" --turbo=always || true
+        cpu_floor high
         ;;
       adaptive)
         "$AUTO_CPUFREQ" --force=reset || true
         "$AUTO_CPUFREQ" --turbo=auto || true
+        cpu_floor normal
         ;;
       platform)
         [[ $# -eq 3 ]] || usage
@@ -158,23 +230,37 @@ case "$1" in
         ;;
       apply)
         [[ $# -eq 4 ]] || usage
-        set_profile "$3"
         case "$4" in
           silent)
+            set_profile "$3"
             "$AUTO_CPUFREQ" --force=powersave || true
             "$AUTO_CPUFREQ" --turbo=never || true
+            cpu_floor normal
             ;;
           quiet)
+            set_profile "$3"
             "$AUTO_CPUFREQ" --force=powersave || true
             "$AUTO_CPUFREQ" --turbo=auto || true
+            cpu_floor normal
             ;;
           balance)
+            set_profile "$3"
             "$AUTO_CPUFREQ" --force=reset || true
             "$AUTO_CPUFREQ" --turbo=auto || true
+            cpu_floor normal
             ;;
           power)
+            set_power_profile
             "$AUTO_CPUFREQ" --force=performance || true
             "$AUTO_CPUFREQ" --turbo=always || true
+            cpu_floor high
+            ;;
+          cool)
+            # Power fan while the CPU is still hot, without pinning the clocks.
+            set_power_profile
+            "$AUTO_CPUFREQ" --force=reset || true
+            "$AUTO_CPUFREQ" --turbo=auto || true
+            cpu_floor normal
             ;;
           *)
             echo "Rejected apply kind: $4" >&2
