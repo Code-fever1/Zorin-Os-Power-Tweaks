@@ -45,6 +45,10 @@ SMOOTH_BRIGHTNESS_DEFAULTS = {
     "brightness_time_constant_sec": 6.0,
     "tick_ms": 100,
     "auto_min_pct": 8.0,
+    # Keyboard follows ambient (stored next to smooth brightness; the helper ignores unknown keys).
+    "kbd_ambient_auto": False,
+    "kbd_ambient_off_above_lux": 18.0,
+    "kbd_ambient_on_below_lux": 7.0,
 }
 BATTERY_ICON_FILE = Path.home() / ".config/zorin-cpu-power/battery-icon.json"
 BATTERY_ICON_MODES = (
@@ -85,7 +89,7 @@ GOVERNOR_LABELS = {
     "schedutil": "Adaptive",
 }
 TURBO_MODES = ("auto", "never", "always")
-TURBO_LABELS = {"auto": "Auto", "never": "Never", "always": "Always"}
+TURBO_LABELS = {"auto": "Auto", "never": "Off", "always": "On"}
 _APPLY_LOCK = threading.Lock()
 
 APP_CSS = """
@@ -1116,6 +1120,9 @@ def schedule_apply(work, on_done) -> bool:
     Starting pkexec inside that handler hides the password dialog and makes
     the item look like it did not click.
     """
+    # Read the keyring on the UI thread. A lookup from the worker can sit
+    # behind the fingerprint prompt and leave the status on "waiting".
+    load_admin_password()
     if not _APPLY_LOCK.acquire(blocking=False):
         return False
 
@@ -1153,15 +1160,32 @@ def _admin_schema():
     )
 
 
-def load_admin_password() -> str | None:
+_cached_admin_password: str | None = None
+_admin_password_known = False
+
+
+def load_admin_password(refresh: bool = False) -> str | None:
+    global _cached_admin_password, _admin_password_known
+    if _admin_password_known and not refresh:
+        return _cached_admin_password
     try:
         gi.require_version("Secret", "1")
         from gi.repository import Secret
 
         stored = Secret.password_lookup_sync(_admin_schema(), {"app": "zorin-cpu-power"}, None)
     except (GLib.Error, ValueError, ImportError):
-        return None
-    return stored or None
+        return _cached_admin_password if _admin_password_known else None
+    _cached_admin_password = stored or None
+    _admin_password_known = True
+    return _cached_admin_password
+
+
+def apply_wait_message(detail: str = "") -> str:
+    if load_admin_password():
+        return "Applying…"
+    if detail:
+        return f"Waiting for the password dialog ({detail})…"
+    return "Waiting for the password dialog…"
 
 
 def admin_password_saved() -> bool:
@@ -1192,7 +1216,9 @@ def _clean_sudo_output(text: str) -> str:
 
 
 def _run_sudo(password: str, args: list[str], timeout: int) -> tuple[bool, str]:
-    cmd = ["sudo", "-S", "-k", "-p", "", "--", str(PRIV_HELPER), *args]
+    # No -k: a successful login is remembered, so the next change does not
+    # start the fingerprint reader again.
+    cmd = ["sudo", "-S", "-p", "", "--", str(PRIV_HELPER), *args]
     try:
         proc = subprocess.run(
             cmd,
@@ -1217,9 +1243,11 @@ def _run_sudo(password: str, args: list[str], timeout: int) -> tuple[bool, str]:
 def check_admin_password(password: str) -> tuple[bool, str]:
     if not password:
         return False, "Enter your login password."
+    # The helper uses a password-only login. `sudo true` still waits on the fingerprint reader.
+    cmd = ["sudo", "-S", "-k", "-p", "", "--", str(PRIV_HELPER), "check"] if PRIV_HELPER.is_file() else ["sudo", "-S", "-k", "-p", "", "--", "true"]
     try:
         proc = subprocess.run(
-            ["sudo", "-S", "-k", "-p", "", "--", "true"],
+            cmd,
             input=password + "\n",
             capture_output=True,
             text=True,
@@ -1254,6 +1282,9 @@ def save_admin_password(password: str) -> tuple[bool, str]:
         return False, f"Could not save the password ({exc})."
     if not stored:
         return False, "Could not save the password in the login keyring."
+    global _cached_admin_password, _admin_password_known
+    _cached_admin_password = password
+    _admin_password_known = True
     return True, "Password saved. Changes apply without asking."
 
 
@@ -1265,6 +1296,9 @@ def forget_admin_password() -> tuple[bool, str]:
         Secret.password_clear_sync(_admin_schema(), {"app": "zorin-cpu-power"}, None)
     except (GLib.Error, ValueError, ImportError) as exc:
         return False, f"Could not remove the saved password ({exc})."
+    global _cached_admin_password, _admin_password_known
+    _cached_admin_password = None
+    _admin_password_known = True
     return True, "Saved password removed. Changes will ask again."
 
 
@@ -1797,18 +1831,19 @@ def format_profile_status(override: str | None = None, governor: str | None = No
     return label
 
 
-def format_turbo_status(override: str | None = None, turbo_live: bool | None = None) -> str:
+def format_turbo_status(override: str | None = None, _turbo_live: bool | None = None) -> str:
+    """Same words as the CPU turbo control and the tray: Auto, On, or Off."""
     override = read_turbo_override() if override is None else override
-    if override == "never":
-        return "off"
-    if override == "always":
-        return "always"
+    return TURBO_LABELS.get(override, "Auto")
+
+
+def format_turbo_live(turbo_live: bool | None = None) -> str:
     turbo_live = read_turbo_live() if turbo_live is None else turbo_live
     if turbo_live is True:
-        return "auto.on"
+        return "On"
     if turbo_live is False:
-        return "auto.off"
-    return "auto"
+        return "Off"
+    return "—"
 
 
 def read_status_footer() -> dict[str, str]:
@@ -2891,12 +2926,25 @@ class KeyboardLight:
         self._idle_proxy = None
         self._brightness_proxy = None
         self._brightness_monitor = None
+        self._kbd_ambient_suppressed = False
+        self._kbd_ambient_enabled = False
+        self._kbd_ambient_high_lux = 18.0
+        self._kbd_ambient_low_lux = 7.0
+        self._sensor_proxy = None
+        self._kbd_ambient_sensor_sub: int = 0
+        self._kbd_ambient_light_claimed = False
         self._load()
         if self.available:
             self._watch_brightness()
         if self.available and self._read_brightness() != (0 if self._blanked else self.level):
             self._write(self.level)
         GLib.timeout_add_seconds(1, self._poll)
+        cfg = load_smooth_brightness_config()
+        self.set_kbd_ambient_config(
+            bool(cfg["kbd_ambient_auto"]),
+            float(cfg["kbd_ambient_off_above_lux"]),
+            float(cfg["kbd_ambient_on_below_lux"]),
+        )
 
     @property
     def available(self) -> bool:
@@ -2915,6 +2963,8 @@ class KeyboardLight:
             return
         level = max(0, min(self.max_brightness, int(level)))
         self._blanked = False
+        if self._kbd_ambient_suppressed:
+            self._kbd_ambient_suppressed = False
         ok, err = self._write(level)
         if ok:
             self.level = level
@@ -2955,6 +3005,8 @@ class KeyboardLight:
         if self._error:
             return self._error
         name = kbd_level_name(self.level, self.max_brightness)
+        if self._kbd_ambient_enabled and self._kbd_ambient_suppressed:
+            return f"Off while the room is bright (ambient). Returns to {name} in dim light."
         if self.level <= 0:
             return "Backlight is off."
         if self._blanked:
@@ -2995,6 +3047,124 @@ class KeyboardLight:
             )
         except OSError:
             pass
+
+    def set_kbd_ambient_config(self, enabled: bool, high_lux: float, low_lux: float) -> None:
+        self._kbd_ambient_high_lux = max(1.0, min(200.0, float(high_lux)))
+        self._kbd_ambient_low_lux = max(0.5, min(199.0, float(low_lux)))
+        if self._kbd_ambient_low_lux >= self._kbd_ambient_high_lux:
+            self._kbd_ambient_low_lux = max(0.5, self._kbd_ambient_high_lux - 5.0)
+        if enabled == self._kbd_ambient_enabled and self._kbd_ambient_sensor_sub:
+            return
+        self._kbd_ambient_enabled = enabled
+        if not enabled:
+            if self._kbd_ambient_sensor_sub and self._sensor_proxy:
+                try:
+                    self._sensor_proxy.disconnect(self._kbd_ambient_sensor_sub)
+                except (TypeError, RuntimeError):
+                    pass
+            self._kbd_ambient_sensor_sub = 0
+            self._release_kbd_ambient_light()
+            self._sensor_proxy = None
+            was = self._kbd_ambient_suppressed
+            self._kbd_ambient_suppressed = False
+            if was and self.available and self.level > 0:
+                ok, err = self._write(self.level)
+                self._error = "" if ok else err
+            self._emit()
+            return
+        self._claim_kbd_ambient_light()
+        self._ensure_kbd_ambient_sensor()
+
+    def _kbd_sensor(self):
+        if self._sensor_proxy is None:
+            bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+            self._sensor_proxy = Gio.DBusProxy.new_sync(
+                bus,
+                Gio.DBusProxyFlags.NONE,
+                None,
+                "net.hadess.SensorProxy",
+                "/net/hadess/SensorProxy",
+                "net.hadess.SensorProxy",
+                None,
+            )
+        return self._sensor_proxy
+
+    def _claim_kbd_ambient_light(self) -> bool:
+        if self._kbd_ambient_light_claimed:
+            return True
+        try:
+            self._kbd_sensor().call_sync("ClaimLight", None, Gio.DBusCallFlags.NONE, 5000, None)
+            self._kbd_ambient_light_claimed = True
+            return True
+        except GLib.Error:
+            self._sensor_proxy = None
+            self._kbd_ambient_light_claimed = False
+            return False
+
+    def _release_kbd_ambient_light(self) -> None:
+        if not self._kbd_ambient_light_claimed or self._sensor_proxy is None:
+            self._kbd_ambient_light_claimed = False
+            return
+        try:
+            self._sensor_proxy.call_sync("ReleaseLight", None, Gio.DBusCallFlags.NONE, 5000, None)
+        except GLib.Error:
+            pass
+        self._kbd_ambient_light_claimed = False
+
+    def _read_ambient_light(self) -> float | None:
+        try:
+            proxy = self._kbd_sensor()
+            has = proxy.get_cached_property("HasAmbientLight")
+            if has is None or not has.unpack():
+                return None
+            level = proxy.get_cached_property("LightLevel")
+            if level is None:
+                return None
+            return max(0.0, float(level.unpack()))
+        except (GLib.Error, TypeError, ValueError):
+            return None
+
+    def _ensure_kbd_ambient_sensor(self) -> None:
+        if not self.available or not self._kbd_ambient_enabled:
+            return
+        try:
+            proxy = self._kbd_sensor()
+            if self._kbd_ambient_sensor_sub == 0:
+                self._kbd_ambient_sensor_sub = proxy.connect(
+                    "g-properties-changed", self._on_kbd_ambient_sensor_changed
+                )
+            lux = self._read_ambient_light()
+            if lux is not None:
+                self._apply_kbd_ambient_lux(lux)
+        except GLib.Error:
+            self._sensor_proxy = None
+
+    def _on_kbd_ambient_sensor_changed(self, _proxy, changed, _invalidated) -> None:
+        if changed is None:
+            return
+        try:
+            if changed.lookup_value("LightLevel", None) is None:
+                return
+        except (TypeError, KeyError, AttributeError):
+            return
+        lux = self._read_ambient_light()
+        if lux is not None:
+            self._apply_kbd_ambient_lux(lux)
+
+    def _apply_kbd_ambient_lux(self, lux: float) -> None:
+        if not self.available or not self._kbd_ambient_enabled or self.level <= 0:
+            return
+        self._kbd_ambient_last_lux = lux
+        if lux >= self._kbd_ambient_high_lux and not self._kbd_ambient_suppressed:
+            self._kbd_ambient_suppressed = True
+            ok, err = self._write(0)
+            self._error = "" if ok else err
+            self._emit()
+        elif lux <= self._kbd_ambient_low_lux and self._kbd_ambient_suppressed:
+            self._kbd_ambient_suppressed = False
+            ok, err = self._write(self.level)
+            self._error = "" if ok else err
+            self._emit()
 
     def _read_max(self) -> int:
         if self.led_path is None:
@@ -3061,6 +3231,8 @@ class KeyboardLight:
             self._brightness_monitor = None
 
     def _on_brightness_file_changed(self, *_args) -> None:
+        if self._kbd_ambient_suppressed:
+            return
         if time.monotonic() < self._hold_until:
             return
         current = self._read_brightness()
@@ -3106,6 +3278,13 @@ class KeyboardLight:
         if not self.available:
             return True
         self._sync_hardware()
+        if self._kbd_ambient_suppressed and self._kbd_ambient_enabled and self.level > 0:
+            cur = self._read_brightness()
+            if cur is not None and cur != 0:
+                ok, err = self._write(0)
+                self._error = "" if ok else err
+                self._emit()
+            return True
         if self.level <= 0 or self.timeout_sec <= 0:
             if self._blanked:
                 self._blanked = False
@@ -3139,6 +3318,8 @@ class KeyboardLight:
         return True
 
     def _sync_hardware(self) -> None:
+        if self._kbd_ambient_suppressed:
+            return
         if time.monotonic() < self._hold_until:
             return
         current = self._read_brightness()
@@ -3182,9 +3363,25 @@ def load_smooth_brightness_config() -> dict:
         cfg["tick_ms"] = int(cfg["tick_ms"])
     except (TypeError, ValueError):
         cfg = dict(SMOOTH_BRIGHTNESS_DEFAULTS)
+    try:
+        cfg["kbd_ambient_off_above_lux"] = float(
+            cfg.get("kbd_ambient_off_above_lux", SMOOTH_BRIGHTNESS_DEFAULTS["kbd_ambient_off_above_lux"])
+        )
+        cfg["kbd_ambient_on_below_lux"] = float(
+            cfg.get("kbd_ambient_on_below_lux", SMOOTH_BRIGHTNESS_DEFAULTS["kbd_ambient_on_below_lux"])
+        )
+        cfg["kbd_ambient_auto"] = bool(cfg.get("kbd_ambient_auto", SMOOTH_BRIGHTNESS_DEFAULTS["kbd_ambient_auto"]))
+    except (TypeError, ValueError):
+        cfg["kbd_ambient_off_above_lux"] = SMOOTH_BRIGHTNESS_DEFAULTS["kbd_ambient_off_above_lux"]
+        cfg["kbd_ambient_on_below_lux"] = SMOOTH_BRIGHTNESS_DEFAULTS["kbd_ambient_on_below_lux"]
+        cfg["kbd_ambient_auto"] = SMOOTH_BRIGHTNESS_DEFAULTS["kbd_ambient_auto"]
     cfg["ambient_bandwidth_hz"] = max(0.005, min(0.2, cfg["ambient_bandwidth_hz"]))
     cfg["brightness_time_constant_sec"] = max(1.0, min(30.0, cfg["brightness_time_constant_sec"]))
     cfg["tick_ms"] = max(50, min(500, cfg["tick_ms"]))
+    cfg["kbd_ambient_off_above_lux"] = max(1.0, min(200.0, cfg["kbd_ambient_off_above_lux"]))
+    cfg["kbd_ambient_on_below_lux"] = max(0.5, min(199.0, cfg["kbd_ambient_on_below_lux"]))
+    if cfg["kbd_ambient_on_below_lux"] >= cfg["kbd_ambient_off_above_lux"]:
+        cfg["kbd_ambient_on_below_lux"] = max(0.5, cfg["kbd_ambient_off_above_lux"] - 5.0)
     return cfg
 
 
@@ -3197,6 +3394,18 @@ def save_smooth_brightness_config(data: dict) -> None:
         1.0, min(30.0, float(data.get("brightness_time_constant_sec", cfg["brightness_time_constant_sec"])))
     )
     cfg["tick_ms"] = max(50, min(500, int(data.get("tick_ms", cfg["tick_ms"]))))
+    if "kbd_ambient_auto" in data:
+        cfg["kbd_ambient_auto"] = bool(data["kbd_ambient_auto"])
+    if "kbd_ambient_off_above_lux" in data:
+        cfg["kbd_ambient_off_above_lux"] = max(
+            1.0, min(200.0, float(data["kbd_ambient_off_above_lux"]))
+        )
+    if "kbd_ambient_on_below_lux" in data:
+        cfg["kbd_ambient_on_below_lux"] = max(
+            0.5, min(199.0, float(data["kbd_ambient_on_below_lux"]))
+        )
+    if cfg["kbd_ambient_on_below_lux"] >= cfg["kbd_ambient_off_above_lux"]:
+        cfg["kbd_ambient_on_below_lux"] = max(0.5, cfg["kbd_ambient_off_above_lux"] - 5.0)
     SMOOTH_BRIGHTNESS_CONF.parent.mkdir(parents=True, exist_ok=True)
     SMOOTH_BRIGHTNESS_CONF.write_text(json.dumps(cfg, indent=2))
 
@@ -3662,6 +3871,7 @@ class ControlWindow(Gtk.Window):
                 self.ui[f"quick_{mode}"] = btn
             elif kind == "turbo":
                 btn.connect("clicked", lambda _b: self._quick_turbo("always"))
+                self.ui["quick_turbo"] = btn
             else:
                 btn.connect("clicked", lambda _b, k=mode: self._show_page(k))
             actions.pack_start(btn, True, True, 0)
@@ -4323,7 +4533,7 @@ class ControlWindow(Gtk.Window):
         if not schedule_apply(work, done):
             self._set_status("A password dialog is already open. Finish that first.")
             return
-        self._set_status("Waiting for the password dialog…")
+        self._set_status(apply_wait_message())
 
     def _on_zram_boot(self, switch: Gtk.Switch, _pspec) -> None:
         if self._updating:
@@ -4349,7 +4559,7 @@ class ControlWindow(Gtk.Window):
             self._updating = False
             self._set_status("A password dialog is already open. Finish that first.")
             return
-        self._set_status("Waiting for the password dialog…")
+        self._set_status(apply_wait_message())
 
     def _on_apply_zram(self, _btn: Gtk.Button) -> None:
         if self._updating or not zram_tools_available():
@@ -4369,7 +4579,7 @@ class ControlWindow(Gtk.Window):
         if not schedule_apply(work, done):
             self._set_status("A password dialog is already open. Finish that first.")
             return
-        self._set_status("Waiting for the password dialog…")
+        self._set_status(apply_wait_message())
 
     def _paint_memory(self) -> None:
         if "mem_ram_line" not in self.ui:
@@ -4629,15 +4839,20 @@ class ControlWindow(Gtk.Window):
     def _paint_live(self) -> None:
         live = self.live
         mode = read_samsung_mode()
-        turbo = read_turbo_override()
         turbo_live = read_turbo_live()
+        if _APPLY_LOCK.locked():
+            turbo = self.turbo_choice.current
+        else:
+            turbo = read_turbo_override()
+            if self.turbo_choice.current != turbo:
+                self.turbo_choice.set_current(turbo)
+        if turbo == "auto":
+            self.turbo_choice.reflect_live_turbo(turbo_live)
         prof_txt = format_profile_status()
         turbo_txt = format_turbo_status(turbo, turbo_live)
         limit = read_charge_limit()
         self.ui["dash_profile"].set_text(prof_txt)
         self.ui["dash_turbo"].set_text(turbo_txt)
-        if turbo == "auto":
-            self.turbo_choice.reflect_live_turbo(turbo_live)
         self.status_profile.set_markup(f"Profile: <b>{prof_txt}</b>")
         self.status_turbo.set_markup(f"Turbo: <b>{turbo_txt}</b>")
         self.ui["dash_limit"].set_text(f"{limit}%" if limit is not None else "—")
@@ -4710,11 +4925,10 @@ class ControlWindow(Gtk.Window):
                 "performance": "Power",
             }.get(read_platform_profile(), read_platform_profile())
         )
-        conf = read_auto_cpufreq_conf()
         self.ui["sum_gov_ac"].set_text("On charger  " + POWER_RULE_LABELS.get(self.power_rules["charger"], ""))
         self.ui["sum_gov_bat"].set_text("On battery  " + POWER_RULE_LABELS.get(self.power_rules["battery"], ""))
-        self.ui["sum_turbo_ac"].set_text("Turbo (charger)  " + TURBO_LABELS.get(conf["charger"]["turbo"], conf["charger"]["turbo"]))
-        self.ui["sum_turbo_bat"].set_text("Turbo (battery)  " + TURBO_LABELS.get(conf["battery"]["turbo"], conf["battery"]["turbo"]))
+        self.ui["sum_turbo_ac"].set_text(f"Turbo  {turbo_txt}")
+        self.ui["sum_turbo_bat"].set_text(f"Boost now  {format_turbo_live(turbo_live)}")
         self.ui["mon_cpu"].set_text(f"CPU  {live['cpu_pct']:.0f}%   ·   {live['freq_ghz']:.2f} GHz   ·   {temp}")
         self.ui["mon_mem"].set_text(f"Memory  {live['mem_pct']:.0f}% used")
         self.ui["mon_disk"].set_text(f"Disk  {live['disk_pct']:.0f}% of /")
@@ -4732,7 +4946,14 @@ class ControlWindow(Gtk.Window):
             if not isinstance(btn, Gtk.Button):
                 continue
             ctx = btn.get_style_context()
-            if mode_name == mode:
+            if mode_name == self.profile_tiles.current:
+                ctx.add_class("selected")
+            else:
+                ctx.remove_class("selected")
+        turbo_btn = self.ui.get("quick_turbo")
+        if isinstance(turbo_btn, Gtk.Button):
+            ctx = turbo_btn.get_style_context()
+            if self.turbo_choice.current == "always":
                 ctx.add_class("selected")
             else:
                 ctx.remove_class("selected")
@@ -4850,7 +5071,7 @@ class ControlWindow(Gtk.Window):
             self.daemon_install_btn.set_sensitive(True)
             self._set_status("A password dialog is already open. Finish that first.")
             return
-        self._set_status("Waiting for the password dialog (installing daemon)…")
+        self._set_status(apply_wait_message("installing daemon"))
 
     def _on_profile_pick(self, mode: str, previous: str) -> None:
         self._apply_choice(lambda: run_profile(mode), previous, self.profile_tiles)
@@ -4874,7 +5095,7 @@ class ControlWindow(Gtk.Window):
             choice.set_current(previous)
             self._set_status("A password dialog is already open. Finish that first.")
             return
-        self._set_status("Waiting for the password dialog…")
+        self._set_status(apply_wait_message())
 
     def _on_save_conf(self, _widget) -> None:
         if self._updating:
@@ -4899,7 +5120,7 @@ class ControlWindow(Gtk.Window):
         if not schedule_apply(work, done):
             self._set_status("A password dialog is already open. Finish that first.")
             return
-        self._set_status("Waiting for the password dialog…")
+        self._set_status(apply_wait_message())
 
     def _on_apply_charge(self, _btn) -> None:
         if self._updating:

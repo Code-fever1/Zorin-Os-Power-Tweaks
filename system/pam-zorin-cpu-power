@@ -1,0 +1,13 @@
+#%PAM-1.0
+# Password only. The normal sudo stack asks the fingerprint reader first and
+# holds the password prompt for about 30 seconds on every change.
+auth	[success=1 default=ignore]	pam_unix.so nullok try_first_pass
+auth	requisite			pam_deny.so
+auth	required			pam_permit.so
+
+session	required	pam_limits.so
+session	required	pam_env.so readenv=1 user_readenv=0
+session	required	pam_env.so readenv=1 envfile=/etc/default/locale user_readenv=0
+
+@include common-account
+@include common-session-noninteractive

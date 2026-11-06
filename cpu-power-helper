@@ -16,6 +16,7 @@ usage() {
   echo "       $0 zramswap-boot enable|disable" >&2
   echo "       $0 samsung-mode MODE" >&2
   echo "       $0 install-daemon" >&2
+  echo "       $0 check" >&2
   exit 1
 }
 
@@ -168,6 +169,9 @@ case "$1" in
         exit 1
         ;;
     esac
+    ;;
+  check)
+    exit 0
     ;;
   install-daemon)
     managed="/opt/auto-cpufreq/current/share/scripts/auto-cpufreq.service"
