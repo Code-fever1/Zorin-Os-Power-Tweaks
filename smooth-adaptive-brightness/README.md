@@ -18,6 +18,12 @@ Runs as a **user systemd service** (`smooth-adaptive-brightness.service`), start
 
 Turn automatic brightness **off** in Settings to return to fully manual control.
 
+### Manual slider + learning
+
+You can still move the **system brightness slider** (Quick Settings or keyboard). Each adjustment is saved for the current ambient light level in `preferences.json`. Auto then **mixes** your learned curve with the live sensor (`preference_mix` in `config.json`, default `0.62`).
+
+After a manual change, auto backs off for a few seconds (`manual_grace_sec`) so the slider does not fight you, then resumes smooth tracking as the room gets brighter or dimmer.
+
 ## Tune
 
 Edit `~/.config/smooth-adaptive-brightness/config.json`:
@@ -25,6 +31,8 @@ Edit `~/.config/smooth-adaptive-brightness/config.json`:
 - `ambient_bandwidth_hz` — lower = slower reaction to room light changes (default `0.035`)
 - `brightness_time_constant_sec` — how long the screen takes to reach a new level (default `6`)
 - `tick_ms` — update interval in ms (default `100`)
+- `preference_mix` — how much to trust learned points vs pure ambient (`0`–`1`, default `0.62`)
+- `manual_grace_sec` — seconds to leave the slider alone after you move it (default `4.5`)
 
 Then:
 

@@ -29,6 +29,8 @@ export default class CpuPowerBatteryColor extends Extension {
     this._painted = []
     this._lastIcon = undefined
     this._lastLabel = undefined
+    this._turboBarOn = false
+    this._turboBarFlipAt = 0
     this._timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1500, () => {
       this._start()
       this._timeoutId = null
@@ -56,14 +58,7 @@ export default class CpuPowerBatteryColor extends Extension {
     } catch (e) {
       this._platformMonitor = null
     }
-    try {
-      const turboFile = Gio.File.new_for_path('/sys/devices/system/cpu/intel_pstate/no_turbo')
-      this._turboMonitor = turboFile.monitor_file(Gio.FileMonitorFlags.NONE, null)
-      this._turboMonitor.connect('changed', () => this._sync())
-    } catch (e) {
-      this._turboMonitor = null
-    }
-    this._pollId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, () => {
+    this._pollId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 2, () => {
       this._sync()
       return GLib.SOURCE_CONTINUE
     })
@@ -92,7 +87,7 @@ export default class CpuPowerBatteryColor extends Extension {
       const file = Gio.File.new_for_path(path)
       const info = file.query_info('time::modified', Gio.FileQueryInfoFlags.NONE, null)
       const age = GLib.get_real_time() / 1000000 - info.get_modification_date_time().to_unix()
-      if (age > 8)
+      if (age > 45)
         return null
       const raw = JSON.parse(this._readText('battery-live.json'))
       if (!raw || typeof raw !== 'object' || !(raw.mode in DEFAULTS))
@@ -147,6 +142,31 @@ export default class CpuPowerBatteryColor extends Extension {
       console.error(`[CPU Power] Battery color settings: ${e.message}`)
     }
     return settings
+  }
+
+  _readTurboOverride() {
+    const text = this._readText('turbo-override')
+    if (text === 'always' || text === 'never' || text === 'auto')
+      return text
+    return ''
+  }
+
+  _stableTurboFromHw(rawOn, override) {
+    if (override === 'always')
+      return true
+    if (override === 'never')
+      return false
+    const now = GLib.get_monotonic_time() / 1e6
+    if (rawOn === this._turboBarOn) {
+      this._turboBarFlipAt = now
+      return this._turboBarOn
+    }
+    const hold = rawOn ? 2.0 : 0.75
+    if (now - this._turboBarFlipAt >= hold) {
+      this._turboBarOn = rawOn
+      this._turboBarFlipAt = now
+    }
+    return this._turboBarOn
   }
 
   _turboIsOn() {
@@ -206,8 +226,7 @@ export default class CpuPowerBatteryColor extends Extension {
         if (text.includes('%'))
           continue
         const label = this._iconLabel(child)
-        const klass = String(child.style_class || '')
-        if (label.includes('battery') || (fromSystem && klass.includes('system-status-icon')))
+        if (label.includes('battery') && !label.includes('brightness'))
           add(child)
         walk(child, fromSystem)
       }
@@ -223,40 +242,52 @@ export default class CpuPowerBatteryColor extends Extension {
     return Main.panel?.statusArea?.quickSettings?._system?._percentageLabel ?? null
   }
 
+  _styleOf(actor) {
+    try {
+      return actor?.get_style?.() || ''
+    } catch (e) {
+      return ''
+    }
+  }
+
+  _hold(actor, style) {
+    if (!actor)
+      return
+    actor._cpuPowerStyle = style || ''
+    if (!actor._cpuPowerBound) {
+      actor._cpuPowerBound = true
+      actor.connect('notify::style', () => {
+        if (actor._cpuPowerLock)
+          return
+        const want = actor._cpuPowerStyle || ''
+        if (!want || this._styleOf(actor) === want)
+          return
+        actor._cpuPowerLock = true
+        try {
+          actor.set_style(want)
+        } catch (e) {
+          // The icon can be destroyed while the panel rebuilds.
+        }
+        actor._cpuPowerLock = false
+      })
+    }
+    if (this._styleOf(actor) === (style || ''))
+      return
+    actor._cpuPowerLock = true
+    try {
+      actor.set_style(style)
+    } catch (e) {
+      // Ignore actors that disappeared mid-update.
+    }
+    actor._cpuPowerLock = false
+  }
+
   _paint(iconStyle, labelStyle) {
-    const system = Main.panel?.statusArea?.quickSettings?._system
-    if (system) {
-      try {
-        system.set_style(null)
-      } catch (e) {
-        // The indicator box can be rebuilt.
-      }
-    }
-    const icons = iconStyle ? this._iconActors() : []
-    const label = this._percentageLabel()
-    const next = new Set(icons)
-    for (const actor of this._painted ?? []) {
-      if (next.has(actor))
-        continue
-      try {
-        actor.set_style(null)
-      } catch (e) {
-        // The panel may have rebuilt the icon since the last paint.
-      }
-    }
+    const icons = this._iconActors()
     this._painted = icons
-    const paint = (actor, style) => {
-      if (!actor)
-        return
-      try {
-        actor.set_style(style)
-      } catch (e) {
-        // Ignore actors that disappeared mid-update.
-      }
-    }
     for (const actor of icons)
-      paint(actor, iconStyle)
-    paint(label, labelStyle)
+      this._hold(actor, iconStyle || '')
+    this._hold(this._percentageLabel(), labelStyle || '')
   }
 
   _sync() {
@@ -264,13 +295,19 @@ export default class CpuPowerBatteryColor extends Extension {
     const published = this._readPublished()
     const mode = published?.mode || this._readMode()
     const entry = settings[mode]
-    const turboOn = published ? published.turbo_on === true : this._turboIsOn()
+    let turboOn = this._lastTurboOn === true
+    if (published && typeof published.turbo_on === 'boolean')
+      turboOn = published.turbo_on === true
+    this._lastTurboOn = turboOn
     const tankColor = published?.tank_color || entry?.color
     const turboColor = published?.turbo_color || settings.turbo?.color
     const tankEnabled = published ? published.tank_enabled !== false : entry?.enabled
     const iconStyle = tankEnabled && tankColor ? `color: ${tankColor} !important;` : null
     const labelStyle = turboOn && turboColor ? `color: ${turboColor} !important;` : null
-    if (iconStyle === this._lastIcon && labelStyle === this._lastLabel)
+    const styleChanged = iconStyle !== this._lastIcon || labelStyle !== this._lastLabel
+    const icons = this._iconActors()
+    const rebound = icons.some(actor => !actor._cpuPowerBound)
+    if (!styleChanged && !rebound)
       return
     this._lastIcon = iconStyle
     this._lastLabel = labelStyle

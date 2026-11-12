@@ -1,42 +1,79 @@
-# Zorin OS Power Tweaks — CPU Power
+# CPU Power (Zorin OS Power Tweaks)
 
-GTK 3 tray and control window for **Zorin OS** / GNOME on laptops where you want **auto-cpufreq**, Samsung-style **platform profiles**, **turbo**, **battery charge limit**, and related tweaks **without** relying on `power-profiles-daemon` for CPU policy.
+**Desktop energy control for Zorin OS and GNOME** — one tray app for profiles, turbo, battery limits, brightness, memory tuning, and scheduling, built around **auto-cpufreq** and Samsung-style **platform profiles** instead of `power-profiles-daemon`.
 
-Developed primarily for **Samsung Galaxy Book** (firmware `platform_profile`) and similar machines; some features degrade gracefully if hardware paths are missing.
-
-**Repository:** [Zorin-Os-Power-Tweaks](https://github.com/Code-fever1/Zorin-Os-Power-Tweaks)
+| | |
+|---|---|
+| **Platform** | Zorin OS / GNOME (Wayland) |
+| **Primary hardware** | Samsung Galaxy Book and similar laptops with ACPI `platform_profile` |
+| **License** | [MIT](LICENSE) |
+| **Repository** | [Code-fever1/Zorin-Os-Power-Tweaks](https://github.com/Code-fever1/Zorin-Os-Power-Tweaks) |
 
 ---
 
-## Features
+## Overview
 
-| Area | What it does |
-|------|----------------|
-| **Dashboard** | Quick overview: profile, turbo state, charge limit, CPU chart, memory strip |
-| **CPU** | Samsung **Silent / Quiet / Balance / Power** and **Adaptive**; adaptive **charger + battery rules** (same options as before the Rules page merge); **turbo** (auto / off / on) |
-| **Battery** | Charge limit (50–100%); **panel battery icon colors** per profile + optional **turbo** tint on the percentage while turbo is on (GNOME Shell extension) |
-| **Display · Beta** | Optional **smooth adaptive screen brightness** user service; ties into GNOME “Automatic brightness”; fade and sensor responsiveness sliders |
-| **Keyboard** | Keyboard **backlight** level and idle timeout; optional **ambient-linked** mode (dims or hides backlight when the room is bright, restores in the dark) using the ambient sensor |
-| **Memory** | Swappiness; **zram-tools** integration (size, algorithm, boot toggle) when installed |
-| **Scheduler** | Time-based overrides for charger/battery rules |
-| **Monitor** | Live stats view |
-| **Settings** | Save your **login password** in the keyring so privileged changes avoid repeating the full PAM fingerprint stack on every click; install/repair **auto-cpufreq** daemon |
+CPU Power is a **GTK 3** application with a **system tray** and full settings window. It wraps **auto-cpufreq** for governor and turbo policy, maps **Silent / Quiet / Balance / Power / Adaptive** modes to firmware platform profiles where available, and adds laptop-specific controls (charge cap, panel battery colors, smooth adaptive brightness, keyboard backlight, zram/swappiness) in one place.
+
+The design goal is **predictable behavior on real hardware**: fewer surprise turbo toggles, profile applies that do not overwrite your turbo choice, and privileged operations that stay inside a small, auditable helper.
+
+---
+
+## Highlights
+
+- **Unified dashboard** — live CPU chart, profile, turbo state (including *Auto · On/Off*), charge limit, and memory snapshot  
+- **CPU page** — Samsung platform modes, **adaptive charger/battery rules**, and turbo (**auto / off / on**)  
+- **Battery** — configurable charge limit (50–100%) and **GNOME Shell** battery icon colors per profile (optional turbo tint on the percentage while boost is active)  
+- **Display (beta)** — optional **smooth adaptive brightness** user service with fade and sensor tuning  
+- **Keyboard** — backlight level, idle blanking, ambient-linked dimming (when a light sensor is available)  
+- **Memory** — swappiness and **zram-tools** integration when installed  
+- **Scheduler** — time-based overrides for charger/battery rules  
+- **Fast applies** — optional login password in GNOME Keyring + dedicated **PAM** stack for the helper (avoids long fingerprint-first sudo delays)  
+- **Stable auto turbo** — optional patch script for auto-cpufreq hysteresis so boost does not pulse around a single load threshold  
+
+---
+
+## Architecture
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│  zorin_cpu_power.py (GTK 3) — tray + ControlWindow          │
+│  ~/.config/zorin-cpu-power/  ·  battery-live.json (tray)   │
+└──────────────────────────┬──────────────────────────────────┘
+                           │ pkexec / sudo → helper
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│  zorin-cpu-power-helper  — whitelisted sysfs / auto-cpufreq   │
+│  Polkit: com.zorin.cpu-power                                │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+         ┌─────────────────┼─────────────────┐
+         ▼                 ▼                 ▼
+  platform_profile    auto-cpufreq       charge / zram
+  intel_pstate        turbo pickle       swappiness
+```
+
+**GNOME Shell extension** (`cpu-power-battery-color@zorin.cpu-power`) reads saved colors and, when the app is running, fresh state from `battery-live.json` so the panel icon matches the UI.
 
 ---
 
 ## Requirements
 
-- **Zorin OS** (or another GNOME-based desktop with similar session APIs).
-- **Python 3** with **PyGObject** (`python3-gi`, `python3-gi-cairo`, GTK 3).
-- **auto-cpufreq** installed and its **daemon** running for profile/turbo commands to apply reliably.
-- **Tray icon** (optional): `gir1.2-ayatanaappindicator3-0.1`.
-- **Saved password** (optional): **GNOME Keyring** / libsecret (schema `com.zorin.cpu-power.AdminPassword`).
-- **zram-tools** (optional): only for the Memory page zram controls.
-- **Ambient / display extras** (optional): `iio-sensor-proxy`, working backlight under `/sys/class/backlight`.
+- **OS:** Zorin OS or another **GNOME** session with similar APIs (tested on Wayland).
+- **Runtime:** Python 3, **PyGObject** (`python3-gi`, `python3-gi-cairo`, GTK 3).
+- **CPU policy:** [auto-cpufreq](https://github.com/AdnanHodzic/auto-cpufreq) installed with **`auto-cpufreq.service`** active.
+- **Tray (optional):** `gir1.2-ayatanaappindicator3-0.1`.
+- **Saved password (optional):** GNOME Keyring / libsecret (`com.zorin.cpu-power.AdminPassword`).
+- **zram-tools (optional):** for Memory page controls.
+- **Sensors (optional):** `iio-sensor-proxy` and a backlight under `/sys/class/backlight` for display/ambient features.
+
+Samsung **Silent/Quiet/Balance/Power** need `/sys/firmware/acpi/platform_profile` with expected profile names.
 
 ---
 
-## Quick install
+## Installation
+
+### User app (no root)
 
 ```bash
 git clone https://github.com/Code-fever1/Zorin-Os-Power-Tweaks.git
@@ -44,73 +81,100 @@ cd Zorin-Os-Power-Tweaks
 ./install.sh
 ```
 
-- Installs the app under `~/.local/share/zorin-cpu-power/`, symlink `~/.local/bin/zorin-cpu-power`, desktop entry, autostart tray entry, and copies the **battery color** Shell extension into `~/.local/share/gnome-shell/extensions/`.
+This installs under `~/.local/share/zorin-cpu-power/`, adds `~/.local/bin/zorin-cpu-power`, a desktop entry, autostart tray entry, and copies the battery-color Shell extension.
 
-**Tray icon dependency** (if you want the top-bar icon):
+**Tray icon dependency:**
 
 ```bash
 sudo apt install gir1.2-ayatanaappindicator3-0.1
 ```
 
-**System helper + PolicyKit** (recommended: fewer prompts, whitelisted operations):
+### System helper (recommended)
+
+Whitelisted privileged operations and quicker applies when a password is saved:
 
 ```bash
 pkexec ./install-system-helper.sh
 ```
 
-This installs `cpu-power-helper` as `/usr/local/libexec/zorin-cpu-power-helper`, Polkit action `com.zorin.cpu-power`, and a small **sudo/PAM** profile so saved-password applies use **password-only** authentication for that helper (avoids long waits when fingerprint PAM runs before password).
+Installs:
 
-**Smooth adaptive brightness** (optional, beta): use `smooth-adaptive-brightness/install.sh` from this repo (see [smooth-adaptive-brightness/README.md](smooth-adaptive-brightness/README.md)).
+- `/usr/local/libexec/zorin-cpu-power-helper`
+- Polkit policy `com.zorin.cpu-power`
+- PAM/sudo drop-ins (`system/pam-zorin-cpu-power`, `system/sudoers-zorin-cpu-power`) so helper invocations can use **password-only** auth
+
+### Optional: smooth adaptive brightness
+
+```bash
+./smooth-adaptive-brightness/install.sh
+```
+
+See [smooth-adaptive-brightness/README.md](smooth-adaptive-brightness/README.md).
+
+### Optional: calmer auto turbo (auto-cpufreq)
+
+If turbo pulses at low load, run once as root after auto-cpufreq is installed (re-run after auto-cpufreq upgrades that replace the venv):
+
+```bash
+sudo python3 system/stabilize-auto-turbo.py
+sudo systemctl restart auto-cpufreq
+```
 
 ---
 
 ## Usage
 
-- Launch **CPU Power** from the app menu, or:  
-  `zorin-cpu-power --window`  
-- **Tray only:**  
-  `zorin-cpu-power --tray-only`  
-- The app is a **single instance** (`com.zorin.cpu-power`). After updating Python, **fully quit** the old process and start again so the UI reloads.
+| Command | Behavior |
+|---------|----------|
+| `zorin-cpu-power --window` | Open the control window |
+| `zorin-cpu-power --tray-only` | Tray icon only (typical autostart) |
 
-In **Settings → Login password**, store your password once; subsequent applies use `sudo` + the helper instead of opening `pkexec` every time (still protected by Polkit/sudo policy).
+The app is **single-instance** (`Gtk.Application` id `com.zorin.cpu-power`). After updating Python, **quit the running app completely** and start again.
+
+In **Settings → Login password**, store your password once. Subsequent applies use `sudo` + the helper instead of a full `pkexec` flow on every click (still governed by Polkit/sudo policy).
 
 ---
 
 ## Security model
 
-- Privileged work goes through **`/usr/local/libexec/zorin-cpu-power-helper`**, which only allows a fixed set of operations (auto-cpufreq args, Samsung `platform_profile`, charge limit, swappiness, zram unit, etc.).
-- **Polkit** policy is in `com.zorin.cpu-power.policy`; `install-system-helper.sh` registers it system-wide.
-- Do not commit real passwords or keyring contents; config under `~/.config/zorin-cpu-power/` is user-local.
+- Privileged work is limited to **`zorin-cpu-power-helper`** — a fixed set of operations (auto-cpufreq CLI, `platform_profile`, charge limit, swappiness, zram unit, etc.).
+- **Do not** commit real passwords or keyring exports; user config lives under `~/.config/zorin-cpu-power/`.
+- Custom PAM for the helper is a **machine-local** convenience for Samsung/Zorin setups; it is not presented as a universal Linux hardening pattern.
 
 ---
 
-## GNOME Shell extension (battery colors)
+## GNOME Shell extension
 
-Extension UUID: `cpu-power-battery-color@zorin.cpu-power`.  
-`install.sh` copies it and adjusts `gsettings` so it can load after login. If the Shell session started **before** the extension existed, you may need a **session restart** once so GNOME picks up new extensions (normal GNOME limitation).
+- **UUID:** `cpu-power-battery-color@zorin.cpu-power`
+- `install.sh` enables it via `gsettings` where possible.
+- If GNOME started before the extension was installed, **log out and back in once** so Shell loads the new extension (normal GNOME limitation).
 
 ---
 
 ## Troubleshooting
 
-| Symptom | What to check |
-|--------|----------------|
+| Symptom | Check |
+|--------|--------|
 | Profile/turbo errors | `systemctl status auto-cpufreq` — use **Repair daemon** in Settings or `auto-cpufreq --install` |
 | Long delay on every change | Run `pkexec ./install-system-helper.sh` and save password in Settings |
-| Tray missing | Install Ayatana AppIndicator package; ensure the app indicator extension is enabled in Zorin |
-| Samsung modes missing | `/sys/firmware/acpi/platform_profile` must exist and list expected profiles |
-| Keyboard ambient mode idle | Requires `net.hadess.SensorProxy` and ambient light support |
-
-For **screen auto brightness** behavior and follow-ups, see [issue #1](https://github.com/Code-fever1/Zorin-Os-Power-Tweaks/issues/1).
+| Missing tray | Install Ayatana AppIndicator; enable app indicator support in Zorin/GNOME |
+| Samsung modes missing | `cat /sys/firmware/acpi/platform_profile` and available choices |
+| Tray color out of sync | Ensure the app is running (publishes `battery-live.json` every ~2s) |
+| Screen auto brightness | Tracking and notes in [issue #1](https://github.com/Code-fever1/Zorin-Os-Power-Tweaks/issues/1) |
 
 ---
 
-## Development
+## Project layout
 
-- Main application: `zorin_cpu_power.py` (GTK 3).
-- Privileged helper: `cpu-power-helper`.
-- Polkit: `com.zorin.cpu-power.policy`.
-- PAM/sudo drop-ins for the helper: `system/pam-zorin-cpu-power`, `system/sudoers-zorin-cpu-power` (installed by `install-system-helper.sh`).
+| Path | Purpose |
+|------|---------|
+| `zorin_cpu_power.py` | Main GTK 3 application |
+| `cpu-power-helper` | Privileged helper (installed to `/usr/local/libexec/`) |
+| `com.zorin.cpu-power.policy` | Polkit rules |
+| `shell-extension/` | GNOME battery color extension |
+| `smooth-adaptive-brightness/` | Optional brightness daemon |
+| `system/` | PAM, sudoers templates, auto-cpufreq turbo patcher |
+| `install.sh` / `install-system-helper.sh` | Installers |
 
 ```bash
 python3 -m py_compile zorin_cpu_power.py
@@ -118,12 +182,18 @@ python3 -m py_compile zorin_cpu_power.py
 
 ---
 
+## Contributing
+
+Issues and PRs are welcome on GitHub. For behavior changes that touch firmware or cpufreq, include hardware model and kernel/GNOME versions.
+
+---
+
 ## License
 
-Distributed under the [MIT License](LICENSE). You may change the copyright line in `LICENSE` to match your legal name or organization before publishing.
+Released under the [MIT License](LICENSE). Copyright (c) 2026 Alijah — update the copyright line in `LICENSE` if you fork for publication.
 
 ---
 
 ## Disclaimer
 
-This is **user-maintained** tooling. It can change CPU frequencies, firmware platform profiles, charge limits, and related kernel settings. Use at your own risk on hardware you understand. Not affiliated with Zorin Group or Samsung.
+This is **community-maintained** tooling. It can change CPU frequencies, firmware platform profiles, charge limits, and related kernel settings. Use at your own risk on hardware you understand. Not affiliated with Zorin Group or Samsung.

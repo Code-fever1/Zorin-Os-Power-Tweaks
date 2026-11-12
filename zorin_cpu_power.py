@@ -52,6 +52,9 @@ SMOOTH_BRIGHTNESS_DEFAULTS = {
 }
 BATTERY_ICON_FILE = Path.home() / ".config/zorin-cpu-power/battery-icon.json"
 BATTERY_LIVE_FILE = Path.home() / ".config/zorin-cpu-power/battery-live.json"
+_turbo_bar_on = False
+_turbo_bar_flip_at = 0.0
+TURBO_SETTINGS_FILE = Path.home() / ".config/zorin-cpu-power/turbo.json"
 BATTERY_ICON_MODES = (
     ("silent", "Silent", "#2DBA6E"),
     ("quiet", "Quiet", "#1FA7A0"),
@@ -1027,7 +1030,10 @@ class TrayPopupWindow(Gtk.Window):
         previous = read_turbo_override()
 
         def work():
-            return run_turbo(mode)
+            ok, msg = run_turbo(mode)
+            if not ok:
+                return ok, msg
+            return sync_turbo_ac_battery_config()
 
         def done(ok: bool, _msg: str) -> None:
             if ok:
@@ -1590,6 +1596,43 @@ def battery_profile_color() -> tuple[float, float, float] | None:
     return hex_to_rgb(str(entry.get("color") or ""))
 
 
+def turbo_allowed_for_power_state(plugged: bool) -> bool:
+    override = read_turbo_override()
+    if override == "never":
+        return False
+    if override == "always":
+        return plugged or load_turbo_settings()["on_battery"]
+    return plugged or load_turbo_settings()["on_battery"]
+
+
+def turbo_bar_display_on(override: str, live_hw: bool | None, plugged: bool) -> bool:
+    """Stable turbo % color — matches CPU page, not raw sysfs flicker in Auto."""
+    global _turbo_bar_on, _turbo_bar_flip_at
+    if not turbo_allowed_for_power_state(plugged):
+        _turbo_bar_on = False
+        _turbo_bar_flip_at = time.monotonic()
+        return False
+    if override == "always":
+        _turbo_bar_on = True
+        _turbo_bar_flip_at = time.monotonic()
+        return True
+    if override == "never":
+        _turbo_bar_on = False
+        _turbo_bar_flip_at = time.monotonic()
+        return False
+    if live_hw is None:
+        return _turbo_bar_on
+    now = time.monotonic()
+    if live_hw == _turbo_bar_on:
+        _turbo_bar_flip_at = now
+        return _turbo_bar_on
+    hold = 2.0 if live_hw else 0.75
+    if now - _turbo_bar_flip_at >= hold:
+        _turbo_bar_on = live_hw
+        _turbo_bar_flip_at = now
+    return _turbo_bar_on
+
+
 def publish_battery_live() -> None:
     """Tell the panel extension the same mode and turbo state the app is showing."""
     mode = running_battery_mode()
@@ -1597,20 +1640,35 @@ def publish_battery_live() -> None:
     entry = settings.get(mode) or {}
     turbo = settings.get("turbo") or {}
     override = read_turbo_override()
-    turbo_on = False
-    if turbo.get("enabled", True) and override != "never":
-        live = read_turbo_live()
-        turbo_on = True if override == "always" else live is True
+    plugged = False
+    try:
+        live = read_live()
+        plugged = bool(live.get("plugged"))
+    except Exception:
+        pass
+    turbo_enabled = bool(turbo.get("enabled", True))
+    if turbo_enabled and turbo_allowed_for_power_state(plugged):
+        turbo_on = turbo_bar_display_on(override, read_turbo_live(), plugged)
+    else:
+        turbo_on = False
     payload = {
         "mode": mode,
         "tank_enabled": bool(entry.get("enabled", True)),
         "tank_color": str(entry.get("color") or ""),
         "turbo_on": turbo_on,
         "turbo_color": str(turbo.get("color") or ""),
+        "turbo_override": override,
     }
+    blob = json.dumps(payload, sort_keys=True) + "\n"
+    try:
+        if BATTERY_LIVE_FILE.is_file() and BATTERY_LIVE_FILE.read_text() == blob:
+            return
+    except OSError:
+        pass
     try:
         BATTERY_LIVE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        BATTERY_LIVE_FILE.write_text(json.dumps(payload) + "\n")
+        BATTERY_LIVE_FILE.write_text(blob)
+        (BATTERY_LIVE_FILE.parent / "turbo-override").write_text(f"{override}\n")
     except OSError:
         pass
 
@@ -1619,13 +1677,23 @@ def read_platform_profile() -> str:
     return _read_file(str(PLATFORM_PROFILE)) or "balanced"
 
 
-def choose_samsung_platform(load: float, temp: float | None, plugged: bool, previous: str | None) -> str:
+def choose_samsung_platform(
+    load: float,
+    temp: float | None,
+    plugged: bool,
+    previous: str | None,
+    *,
+    allow_power: bool = True,
+) -> str:
     """Pick Silent, Quiet, Balance, or Power. Idle fan is already off, so Quiet and Balance matter once the CPU is warm."""
     temp = 40.0 if temp is None else temp
     if temp >= 78:
-        raw = "performance" if plugged and load >= 40 else "balanced"
+        if allow_power and plugged and load >= 40:
+            raw = "performance"
+        else:
+            raw = "balanced"
     elif plugged:
-        if load >= 50:
+        if allow_power and load >= 50:
             raw = "performance"
         elif load >= 20:
             raw = "balanced"
@@ -1641,7 +1709,7 @@ def choose_samsung_platform(load: float, temp: float | None, plugged: bool, prev
         raw = "low-power"
     else:
         raw = "quiet"
-    if previous == "performance" and plugged and load >= 35 and temp < 82:
+    if allow_power and previous == "performance" and plugged and load >= 35 and temp < 82:
         raw = "performance"
     elif previous == "low-power" and load <= 14 and temp < 52:
         raw = "low-power"
@@ -1649,10 +1717,10 @@ def choose_samsung_platform(load: float, temp: float | None, plugged: bool, prev
         raw = "quiet"
     elif previous == "balanced" and 15 < load < 58 and temp < 80:
         raw = "balanced"
-    return hold_until_cool(raw, previous, temp)
+    return hold_until_cool(raw, previous, temp, allow_power=allow_power)
 
 
-def hold_until_cool(choice: str, previous: str | None, temp: float) -> str:
+def hold_until_cool(choice: str, previous: str | None, temp: float, *, allow_power: bool = True) -> str:
     """After Power or Balance, keep that fan until the CPU has cooled.
 
     Load falls as soon as a hard task ends. Temperature does not. Quiet and
@@ -1661,7 +1729,11 @@ def hold_until_cool(choice: str, previous: str | None, temp: float) -> str:
     if choice == "low-power" and temp >= 48:
         choice = "quiet"
     if choice in ("quiet", "low-power") and temp >= 55 and previous in ("performance", "balanced"):
-        return "performance" if previous == "performance" else "balanced"
+        if previous == "performance" and allow_power:
+            return "performance"
+        return "balanced"
+    if not allow_power and choice == "performance":
+        return "balanced"
     return choice
 
 
@@ -1672,9 +1744,10 @@ def cooling_hold(choice: str, load: float, temp: float | None, previous: str | N
     return choice == "performance" and previous == "performance" and load < 35 and temp >= 55
 
 
-POWER_RULES = ("adaptive", "powersave", "silent", "quiet", "balance", "power")
+POWER_RULES = ("adaptive", "balance_auto", "powersave", "silent", "quiet", "balance", "power")
 POWER_RULE_LABELS = {
-    "adaptive": "Adaptive (all 4)",
+    "adaptive": "Adaptive (auto)",
+    "balance_auto": "Balance (auto)",
     "powersave": "Power save (Silent + Quiet)",
     "silent": "Force silent",
     "quiet": "Force quiet",
@@ -1691,7 +1764,12 @@ PLATFORM_KIND = {
 
 
 def normalize_power_rule(value: str | None, fallback: str = "adaptive") -> str:
-    aliases = {"default": "adaptive", "balanced": "balance", "performance": "power", "powersave": "powersave"}
+    aliases = {
+        "default": "adaptive",
+        "balanced": "balance_auto",
+        "performance": "power",
+        "powersave": "powersave",
+    }
     value = aliases.get(value or "", value or "")
     return value if value in POWER_RULES else fallback
 
@@ -1729,7 +1807,9 @@ def choose_powersave_platform(load: float, temp: float | None, previous: str | N
 def platform_for_rule(rule: str, load: float, temp: float | None, plugged: bool, previous: str | None) -> str:
     rule = normalize_power_rule(rule)
     if rule == "adaptive":
-        return choose_samsung_platform(load, temp, plugged, previous)
+        return choose_samsung_platform(load, temp, plugged, previous, allow_power=True)
+    if rule == "balance_auto":
+        return choose_samsung_platform(load, temp, plugged, previous, allow_power=False)
     if rule == "powersave":
         return choose_powersave_platform(load, temp, previous)
     return SAMSUNG_PLATFORM[rule]
@@ -1799,6 +1879,55 @@ def set_charge_limit(percent: int) -> tuple[bool, str]:
         USER_CONF.write_text(str(percent))
         return True, f"Charge limit set to {percent}%"
     return ok, msg
+
+
+def default_turbo_settings() -> dict:
+    return {"on_battery": False}
+
+
+def load_turbo_settings() -> dict:
+    data = default_turbo_settings()
+    try:
+        saved = json.loads(TURBO_SETTINGS_FILE.read_text())
+        if isinstance(saved.get("on_battery"), bool):
+            data["on_battery"] = saved["on_battery"]
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
+    return data
+
+
+def save_turbo_settings(data: dict) -> None:
+    TURBO_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    base = default_turbo_settings()
+    if isinstance(data.get("on_battery"), bool):
+        base["on_battery"] = data["on_battery"]
+    TURBO_SETTINGS_FILE.write_text(json.dumps(base, indent=2) + "\n")
+
+
+def battery_turbo_for_ac_policy(user_turbo: str, on_battery: bool) -> str:
+    """Default: turbo auto/always apply on charger only; battery stays never until enabled."""
+    user_turbo = user_turbo if user_turbo in TURBO_MODES else "auto"
+    if user_turbo == "never":
+        return "never"
+    if not on_battery:
+        return "never"
+    return user_turbo
+
+
+def sync_turbo_ac_battery_config(on_battery: bool | None = None) -> tuple[bool, str]:
+    conf = read_auto_cpufreq_conf()
+    user = read_turbo_override()
+    if on_battery is None:
+        on_battery = load_turbo_settings()["on_battery"]
+    charger = {
+        "governor": conf["charger"]["governor"],
+        "turbo": user if user in TURBO_MODES else "auto",
+    }
+    battery = {
+        "governor": conf["battery"]["governor"],
+        "turbo": battery_turbo_for_ac_policy(user, on_battery),
+    }
+    return save_daemon_config(charger, battery)
 
 
 def save_daemon_config(charger: dict[str, str], battery: dict[str, str]) -> tuple[bool, str]:
@@ -2964,6 +3093,7 @@ class KeyboardLight:
         self._sensor_proxy = None
         self._kbd_ambient_sensor_sub: int = 0
         self._kbd_ambient_light_claimed = False
+        self._kbd_ambient_last_lux = 0.0
         self._load()
         if self.available:
             self._watch_brightness()
@@ -3003,6 +3133,10 @@ class KeyboardLight:
             self._save()
         else:
             self._error = err or "Could not change the keyboard backlight."
+        if self._kbd_ambient_enabled and self.level > 0:
+            lux = self._read_ambient_light()
+            if lux is not None:
+                self._apply_kbd_ambient_lux(lux)
         self._emit()
 
     def refresh_from_hardware(self) -> None:
@@ -3037,7 +3171,9 @@ class KeyboardLight:
             return self._error
         name = kbd_level_name(self.level, self.max_brightness)
         if self._kbd_ambient_enabled and self._kbd_ambient_suppressed:
-            return f"Off while the room is bright (ambient). Returns to {name} in dim light."
+            return f"Adaptive — off while the room is bright. Returns to {name} in dim light."
+        if self._kbd_ambient_enabled and self.level > 0:
+            return f"{name}. Adaptive is on — backlight turns off when the room is bright enough."
         if self.level <= 0:
             return "Backlight is off."
         if self._blanked:
@@ -3078,6 +3214,30 @@ class KeyboardLight:
             )
         except OSError:
             pass
+
+    @property
+    def ambient_auto(self) -> bool:
+        return self._kbd_ambient_enabled
+
+    def ambient_status_line(self) -> str:
+        if not self._kbd_ambient_enabled:
+            return "Ambient dimming is off."
+        lux = self._kbd_ambient_last_lux
+        if lux <= 0.05:
+            live = self._read_ambient_light()
+            if live is not None:
+                lux = live
+        off_at = self._kbd_ambient_high_lux
+        on_at = self._kbd_ambient_low_lux
+        if lux > 0.05:
+            lux_part = f"Room ~{lux:.0f} lux"
+        else:
+            lux_part = "Waiting for ambient sensor"
+        if self._kbd_ambient_suppressed:
+            return f"{lux_part} — backlight off (above {off_at:.0f} lux). On again below {on_at:.0f} lux."
+        if self.level <= 0:
+            return f"{lux_part} — set brightness above Off to use ambient dimming."
+        return f"{lux_part} — backlight on (dims above {off_at:.0f} lux)."
 
     def set_kbd_ambient_config(self, enabled: bool, high_lux: float, low_lux: float) -> None:
         self._kbd_ambient_high_lux = max(1.0, min(200.0, float(high_lux)))
@@ -3309,6 +3469,10 @@ class KeyboardLight:
         if not self.available:
             return True
         self._sync_hardware()
+        if self._kbd_ambient_enabled and self.level > 0:
+            lux = self._read_ambient_light()
+            if lux is not None:
+                self._apply_kbd_ambient_lux(lux)
         if self._kbd_ambient_suppressed and self._kbd_ambient_enabled and self.level > 0:
             cur = self._read_brightness()
             if cur is not None and cur != 0:
@@ -3672,6 +3836,47 @@ class ControlWindow(Gtk.Window):
         self.refresh_status()
         self._sync_daemon_banner(force=not is_auto_cpufreq_daemon_active())
         self._start_live_updates()
+        GLib.idle_add(self._maybe_sync_turbo_battery_policy)
+
+    def _maybe_sync_turbo_battery_policy(self) -> bool:
+        settings = load_turbo_settings()
+        conf = read_auto_cpufreq_conf()
+        user = read_turbo_override()
+        want_charger = user if user in TURBO_MODES else "auto"
+        want_battery = battery_turbo_for_ac_policy(user, settings["on_battery"])
+        if conf["charger"]["turbo"] == want_charger and conf["battery"]["turbo"] == want_battery:
+            return False
+
+        def work():
+            return sync_turbo_ac_battery_config(settings["on_battery"])
+
+        schedule_apply(work, lambda ok, msg: self._set_status(msg if ok else msg))
+        return False
+
+    def _on_turbo_on_battery_switch(self, _switch: Gtk.Switch, _pspec) -> None:
+        if self._updating or not hasattr(self, "turbo_on_battery_sw"):
+            return
+        enabled = self.turbo_on_battery_sw.get_active()
+        save_turbo_settings({"on_battery": enabled})
+
+        def work():
+            return sync_turbo_ac_battery_config(enabled)
+
+        def done(ok: bool, msg: str) -> None:
+            if ok:
+                self._set_status(
+                    "Turbo on battery enabled."
+                    if enabled
+                    else "Turbo on battery disabled — battery uses never."
+                )
+                self.refresh_status()
+            else:
+                self._set_status(msg)
+
+        if not schedule_apply(work, done):
+            self._set_status("A password dialog is already open. Finish that first.")
+            return
+        self._set_status(apply_wait_message())
 
     def _on_delete_hide(self, *_args) -> bool:
         self.hide()
@@ -3761,11 +3966,17 @@ class ControlWindow(Gtk.Window):
         if self._updating:
             return
         self.display_fade_val.set_text(f"{scale.get_value():.1f} s")
+        cfg = load_smooth_brightness_config()
+        cfg["brightness_time_constant_sec"] = max(1.0, min(30.0, float(scale.get_value())))
+        save_smooth_brightness_config(cfg)
 
     def _on_display_ambient_smooth(self, scale: Gtk.Scale) -> None:
         if self._updating:
             return
         self.display_ambient_val.set_text(f"{scale.get_value():.3f} Hz")
+        cfg = load_smooth_brightness_config()
+        cfg["ambient_bandwidth_hz"] = max(0.005, min(0.2, float(scale.get_value())))
+        save_smooth_brightness_config(cfg)
 
     def _on_apply_display_smooth(self, _btn: Gtk.Button) -> None:
         save_smooth_brightness_config({
@@ -3955,13 +4166,28 @@ class ControlWindow(Gtk.Window):
         turbo.set_border_width(14)
         turbo.pack_start(Gtk.Label(label="Turbo boost", halign=Gtk.Align.START), False, False, 0)
         note = Gtk.Label(
-            label="Auto turns boost on only while the CPU stays busy (about 40% or more) and leaves it off below about 15%. It does not pulse on and off for small load changes. It also turns boost off when the CPU is warm and idle.",
+            label="Auto turns boost on only while the CPU stays busy (about 40% or more) and leaves it off below about 15%. "
+            "It does not pulse on and off for small load changes. It also turns boost off when the CPU is warm and idle. "
+            "By default, Auto and On apply on charger only — turn on On battery to use the same turbo mode on battery.",
             wrap=True,
             halign=Gtk.Align.START,
         )
         note.get_style_context().add_class("cpu-card-desc")
         turbo.pack_start(note, False, False, 0)
         turbo.pack_start(self.turbo_choice.box, False, False, 0)
+        self.turbo_on_battery_sw = Gtk.Switch()
+        self.turbo_on_battery_sw.set_active(load_turbo_settings()["on_battery"])
+        self.turbo_on_battery_sw.connect("notify::active", self._on_turbo_on_battery_switch)
+        turbo.pack_start(
+            self._switch_row(
+                "On battery",
+                "When off, turbo stays off on battery even if you chose Auto or On.",
+                self.turbo_on_battery_sw,
+            ),
+            False,
+            False,
+            0,
+        )
         box.pack_start(turbo, False, False, 0)
         return outer
 
@@ -3974,7 +4200,8 @@ class ControlWindow(Gtk.Window):
         card.pack_start(title, False, False, 0)
         card.pack_start(
             Gtk.Label(
-                label="Used while Adaptive is selected. Power save stays in Silent and Quiet. Adaptive can use all four modes.",
+                label="Used while Adaptive is selected. Adaptive (auto) can use all four modes. "
+                "Balance (auto) follows load like Adaptive but stays on Silent, Quiet, or Balance — never Power.",
                 wrap=True,
                 halign=Gtk.Align.START,
             ),
@@ -3993,7 +4220,7 @@ class ControlWindow(Gtk.Window):
             card.pack_start(row, False, False, 0)
         note = Gtk.Label(
             label="Force silent, Force quiet, Force balance, and Force power stay on that one mode. "
-            "Power save moves between Silent and Quiet. Adaptive moves among Silent, Quiet, Balance, and Power.",
+            "Power save moves between Silent and Quiet. Adaptive (auto) uses all four modes; Balance (auto) uses the first three.",
             wrap=True,
             halign=Gtk.Align.START,
         )
@@ -4221,7 +4448,9 @@ class ControlWindow(Gtk.Window):
         status_card.pack_start(amb_row, False, False, 0)
         status_card.pack_start(
             Gtk.Label(
-                label="Uses the same toggle as Zorin Settings. The smooth brightness service must be running.",
+                label="Uses the same toggle as Zorin Settings. The smooth brightness service must be running. "
+                "Drag the system brightness slider anytime — it learns that level for the current room light "
+                "and blends it with the sensor (saved in ~/.config/smooth-adaptive-brightness/preferences.json).",
                 wrap=True,
                 halign=Gtk.Align.START,
             ),
@@ -4304,6 +4533,34 @@ class ControlWindow(Gtk.Window):
             "Keyboard",
             "Keyboard backlight brightness, and how long it stays on after you stop using the computer.",
         )
+        cfg = load_smooth_brightness_config()
+        ambient_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        ambient_card.get_style_context().add_class("cpu-card")
+        ambient_card.set_border_width(14)
+        ambient_title = Gtk.Label(label="Ambient dimming", halign=Gtk.Align.START)
+        ambient_title.get_style_context().add_class("cpu-card-title")
+        ambient_card.pack_start(ambient_title, False, False, 0)
+        self.kbd_ambient_switch = Gtk.Switch()
+        self.kbd_ambient_switch.set_valign(Gtk.Align.CENTER)
+        self.kbd_ambient_switch.set_active(kbd.ambient_auto)
+        self.kbd_ambient_switch.set_sensitive(kbd.available)
+        self.kbd_ambient_switch.connect("notify::active", self._on_kbd_ambient_switch)
+        ambient_card.pack_start(
+            self._switch_row(
+                "Adaptive",
+                f"Turns keyboard backlight off when the room is bright (above {cfg['kbd_ambient_off_above_lux']:.0f} lux), "
+                f"and back on when it gets dim (below {cfg['kbd_ambient_on_below_lux']:.0f} lux).",
+                self.kbd_ambient_switch,
+            ),
+            False,
+            False,
+            0,
+        )
+        self.kbd_ambient_detail = Gtk.Label(halign=Gtk.Align.START, wrap=True)
+        self.kbd_ambient_detail.get_style_context().add_class("cpu-limit-active")
+        ambient_card.pack_start(self.kbd_ambient_detail, False, False, 0)
+        box.pack_start(ambient_card, False, False, 0)
+
         bright = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         bright.get_style_context().add_class("cpu-card")
         bright.set_border_width(14)
@@ -4381,6 +4638,22 @@ class ControlWindow(Gtk.Window):
     def _on_kbd_timeout(self, _btn: Gtk.Button, seconds: int) -> None:
         get_keyboard().set_timeout(seconds)
 
+    def _apply_kbd_ambient_setting(self, enabled: bool) -> None:
+        cfg = load_smooth_brightness_config()
+        cfg["kbd_ambient_auto"] = enabled
+        save_smooth_brightness_config(cfg)
+        get_keyboard().set_kbd_ambient_config(
+            enabled,
+            float(cfg["kbd_ambient_off_above_lux"]),
+            float(cfg["kbd_ambient_on_below_lux"]),
+        )
+        self._sync_kbd_ui()
+
+    def _on_kbd_ambient_switch(self, switch: Gtk.Switch, _pspec) -> None:
+        if self._updating:
+            return
+        self._apply_kbd_ambient_setting(switch.get_active())
+
     def _on_kbd_external(self) -> None:
         self._sync_kbd_ui()
 
@@ -4398,6 +4671,11 @@ class ControlWindow(Gtk.Window):
                     ctx.add_class("selected")
                 else:
                     ctx.remove_class("selected")
+            if hasattr(self, "kbd_ambient_switch"):
+                if self.kbd_ambient_switch.get_active() != kbd.ambient_auto:
+                    self.kbd_ambient_switch.set_active(kbd.ambient_auto)
+            if hasattr(self, "kbd_ambient_detail"):
+                self.kbd_ambient_detail.set_text(kbd.ambient_status_line())
             self.kbd_status.set_text(kbd.status_line())
         finally:
             self._updating = False
@@ -4879,9 +5157,11 @@ class ControlWindow(Gtk.Window):
             if self.turbo_choice.current != turbo:
                 self.turbo_choice.set_current(turbo)
         if turbo == "auto":
-            self.turbo_choice.reflect_live_turbo(turbo_live)
+            display = turbo_bar_display_on(turbo, turbo_live, bool(live.get("plugged")))
+            self.turbo_choice.reflect_live_turbo(display)
         prof_txt = format_profile_status()
-        turbo_txt = format_turbo_status(turbo, turbo_live)
+        bar_turbo = turbo_bar_display_on(turbo, turbo_live, bool(live.get("plugged"))) if turbo == "auto" else None
+        turbo_txt = format_turbo_status(turbo, bar_turbo if bar_turbo is not None else turbo_live)
         limit = read_charge_limit()
         self.ui["dash_profile"].set_text(prof_txt)
         self.ui["dash_turbo"].set_text(turbo_txt)
@@ -4960,7 +5240,15 @@ class ControlWindow(Gtk.Window):
         self.ui["sum_gov_ac"].set_text("On charger  " + POWER_RULE_LABELS.get(self.power_rules["charger"], ""))
         self.ui["sum_gov_bat"].set_text("On battery  " + POWER_RULE_LABELS.get(self.power_rules["battery"], ""))
         self.ui["sum_turbo_ac"].set_text(f"Turbo  {turbo_txt}")
-        self.ui["sum_turbo_bat"].set_text(f"Boost now  {format_turbo_live(turbo_live)}")
+        if (
+            not live.get("plugged")
+            and not load_turbo_settings()["on_battery"]
+            and turbo != "never"
+        ):
+            bat_boost = "Off (charger only)"
+        else:
+            bat_boost = format_turbo_live(turbo_live)
+        self.ui["sum_turbo_bat"].set_text(f"Boost now  {bat_boost}")
         self.ui["mon_cpu"].set_text(f"CPU  {live['cpu_pct']:.0f}%   ·   {live['freq_ghz']:.2f} GHz   ·   {temp}")
         self.ui["mon_mem"].set_text(f"Memory  {live['mem_pct']:.0f}% used")
         self.ui["mon_disk"].set_text(f"Disk  {live['disk_pct']:.0f}% of /")
@@ -5109,7 +5397,13 @@ class ControlWindow(Gtk.Window):
         self._apply_choice(lambda: run_profile(mode), previous, self.profile_tiles)
 
     def _on_turbo_pick(self, mode: str, previous: str) -> None:
-        self._apply_choice(lambda: run_turbo(mode), previous, self.turbo_choice)
+        def work():
+            ok, msg = run_turbo(mode)
+            if not ok:
+                return ok, msg
+            return sync_turbo_ac_battery_config()
+
+        self._apply_choice(work, previous, self.turbo_choice)
 
     def _apply_choice(self, work, previous: str, choice) -> None:
         def done(ok: bool, msg: str) -> None:
@@ -5138,7 +5432,10 @@ class ControlWindow(Gtk.Window):
         }
         battery = {
             "governor": _combo_value(self.battery_gov[1], GOVERNORS),
-            "turbo": _combo_value(self.battery_turbo[1], TURBO_MODES),
+            "turbo": battery_turbo_for_ac_policy(
+                read_turbo_override(),
+                load_turbo_settings()["on_battery"],
+            ),
         }
 
         def work():
@@ -5201,7 +5498,17 @@ class ControlWindow(Gtk.Window):
             )
         self._sync_preset_highlight(limit)
         if turbo == "auto":
-            self.turbo_choice.reflect_live_turbo(read_turbo_live())
+            try:
+                plugged = bool(read_live().get("plugged"))
+            except Exception:
+                plugged = False
+            self.turbo_choice.reflect_live_turbo(
+                turbo_bar_display_on(turbo, read_turbo_live(), plugged)
+            )
+        if hasattr(self, "turbo_on_battery_sw"):
+            want = load_turbo_settings()["on_battery"]
+            if self.turbo_on_battery_sw.get_active() != want:
+                self.turbo_on_battery_sw.set_active(want)
         self._updating = False
         footer = read_status_footer()
         self.status_profile.set_markup(f"Profile: <b>{footer['profile']}</b>")
@@ -5328,6 +5635,8 @@ class CpuPowerApp(Gtk.Application):
             pass
         self._build_tray_menu()
         self._tray_ok = self._build_tray()
+        GLib.timeout_add_seconds(1, self._publish_battery_bar)
+        publish_battery_live()
         if self._tray_ok:
             self.hold()
 
@@ -5365,7 +5674,12 @@ class CpuPowerApp(Gtk.Application):
             self.tray_popup.hide()
         self.quit()
 
+    def _publish_battery_bar(self) -> bool:
+        publish_battery_live()
+        return True
+
     def _on_changed(self) -> None:
+        publish_battery_live()
         self._sync_tray()
         if self.window:
             self.window.refresh_status()
