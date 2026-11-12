@@ -1,7 +1,9 @@
 import Gio from 'gi://Gio'
 import GLib from 'gi://GLib'
+import St from 'gi://St'
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js'
 import * as Main from 'resource:///org/gnome/shell/ui/main.js'
+import * as GdmUtil from 'resource:///org/gnome/shell/gdm/util.js'
 
 const DEFAULTS = {
   silent: { enabled: true, color: '#2DBA6E' },
@@ -29,8 +31,9 @@ export default class CpuPowerBatteryColor extends Extension {
     this._painted = []
     this._lastIcon = undefined
     this._lastLabel = undefined
-    this._turboBarOn = false
-    this._turboBarFlipAt = 0
+    this._fpSub = 0
+    this._css = ''
+    this._cssFile = null
     this._timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1500, () => {
       this._start()
       this._timeoutId = null
@@ -51,6 +54,23 @@ export default class CpuPowerBatteryColor extends Extension {
       console.error(`[CPU Power] Could not watch mode files: ${e.message}`)
     }
     this._sync()
+    this._fpSub = Gio.DBus.system.signal_subscribe(
+      'net.reactivated.Fprint',
+      'net.reactivated.Fprint.Device',
+      'VerifyStatus',
+      null,
+      null,
+      Gio.DBusSignalFlags.NONE,
+      (_bus, _sender, _path, _iface, _signal, params) => {
+        let result = ''
+        try {
+          result = params.get_child_value(0).unpack()
+        } catch (e) {
+          return
+        }
+        if (result === 'verify-match')
+          this._showFingerprintAccepted()
+      })
     try {
       const platformFile = Gio.File.new_for_path('/sys/firmware/acpi/platform_profile')
       this._platformMonitor = platformFile.monitor_file(Gio.FileMonitorFlags.NONE, null)
@@ -242,52 +262,38 @@ export default class CpuPowerBatteryColor extends Extension {
     return Main.panel?.statusArea?.quickSettings?._system?._percentageLabel ?? null
   }
 
-  _styleOf(actor) {
-    try {
-      return actor?.get_style?.() || ''
-    } catch (e) {
-      return ''
-    }
+  _theme() {
+    return St.ThemeContext.get_for_stage(global.stage).get_theme()
   }
 
-  _hold(actor, style) {
-    if (!actor)
+  _setCss(css) {
+    if (css === this._css)
       return
-    actor._cpuPowerStyle = style || ''
-    if (!actor._cpuPowerBound) {
-      actor._cpuPowerBound = true
-      actor.connect('notify::style', () => {
-        if (actor._cpuPowerLock)
-          return
-        const want = actor._cpuPowerStyle || ''
-        if (!want || this._styleOf(actor) === want)
-          return
-        actor._cpuPowerLock = true
-        try {
-          actor.set_style(want)
-        } catch (e) {
-          // The icon can be destroyed while the panel rebuilds.
-        }
-        actor._cpuPowerLock = false
-      })
-    }
-    if (this._styleOf(actor) === (style || ''))
-      return
-    actor._cpuPowerLock = true
-    try {
-      actor.set_style(style)
-    } catch (e) {
-      // Ignore actors that disappeared mid-update.
-    }
-    actor._cpuPowerLock = false
+    this._css = css
+    const path = GLib.build_filenamev([GLib.get_user_cache_dir(), 'cpu-power-bar.css'])
+    GLib.file_set_contents(path, css)
+    const file = Gio.File.new_for_path(path)
+    const theme = this._theme()
+    if (this._cssFile)
+      theme.unload_stylesheet(this._cssFile)
+    theme.load_stylesheet(file)
+    this._cssFile = file
   }
 
-  _paint(iconStyle, labelStyle) {
-    const icons = this._iconActors()
-    this._painted = icons
-    for (const actor of icons)
-      this._hold(actor, iconStyle || '')
-    this._hold(this._percentageLabel(), labelStyle || '')
+  _tag(actor, className, on) {
+    if (!actor?.add_style_class_name)
+      return
+    const has = actor.has_style_class_name(className)
+    if (on && !has)
+      actor.add_style_class_name(className)
+    else if (!on && has)
+      actor.remove_style_class_name(className)
+  }
+
+  _paint(tankOn, turboOn) {
+    for (const actor of this._iconActors())
+      this._tag(actor, 'cpu-power-tank', tankOn)
+    this._tag(this._percentageLabel(), 'cpu-power-turbo-pct', turboOn)
   }
 
   _sync() {
@@ -295,26 +301,36 @@ export default class CpuPowerBatteryColor extends Extension {
     const published = this._readPublished()
     const mode = published?.mode || this._readMode()
     const entry = settings[mode]
-    let turboOn = this._lastTurboOn === true
-    if (published && typeof published.turbo_on === 'boolean')
-      turboOn = published.turbo_on === true
-    this._lastTurboOn = turboOn
-    const tankColor = published?.tank_color || entry?.color
-    const turboColor = published?.turbo_color || settings.turbo?.color
-    const tankEnabled = published ? published.tank_enabled !== false : entry?.enabled
-    const iconStyle = tankEnabled && tankColor ? `color: ${tankColor} !important;` : null
-    const labelStyle = turboOn && turboColor ? `color: ${turboColor} !important;` : null
-    const styleChanged = iconStyle !== this._lastIcon || labelStyle !== this._lastLabel
-    const icons = this._iconActors()
-    const rebound = icons.some(actor => !actor._cpuPowerBound)
-    if (!styleChanged && !rebound)
+    const turboOn = published?.turbo_on === true
+    const tankColor = published?.tank_color || entry?.color || DEFAULTS.balance.color
+    const turboColor = published?.turbo_color || settings.turbo?.color || TURBO_DEFAULT.color
+    const tankOn = (published ? published.tank_enabled !== false : entry?.enabled) && !!tankColor
+    const rules = []
+    if (tankOn)
+      rules.push(`.cpu-power-tank { color: ${tankColor} !important; }`)
+    if (turboOn)
+      rules.push(`.cpu-power-turbo-pct { color: ${turboColor} !important; }`)
+    this._setCss(`${rules.join('\n')}\n`)
+    this._paint(tankOn, turboOn)
+  }
+
+  _showFingerprintAccepted() {
+    const prompt = Main.screenShield?._dialog?._authPrompt
+    if (!prompt)
       return
-    this._lastIcon = iconStyle
-    this._lastLabel = labelStyle
-    this._paint(iconStyle, labelStyle)
+    try {
+      prompt.setMessage('Fingerprint recognized — logging in', GdmUtil.MessageType.INFO)
+      prompt.startSpinning()
+    } catch (e) {
+      console.error(`[CPU Power] Fingerprint feedback: ${e}`)
+    }
   }
 
   disable() {
+    if (this._fpSub) {
+      Gio.DBus.system.signal_unsubscribe(this._fpSub)
+      this._fpSub = 0
+    }
     if (this._timeoutId) {
       GLib.source_remove(this._timeoutId)
       this._timeoutId = null
@@ -335,6 +351,15 @@ export default class CpuPowerBatteryColor extends Extension {
       this._turboMonitor.cancel()
       this._turboMonitor = null
     }
-    this._paint(null, null)
+    this._paint(false, false)
+    if (this._cssFile) {
+      try {
+        this._theme().unload_stylesheet(this._cssFile)
+      } catch (e) {
+        // The stage theme can already be gone during shutdown.
+      }
+      this._cssFile = null
+      this._css = ''
+    }
   }
 }

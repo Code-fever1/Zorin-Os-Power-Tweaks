@@ -52,8 +52,6 @@ SMOOTH_BRIGHTNESS_DEFAULTS = {
 }
 BATTERY_ICON_FILE = Path.home() / ".config/zorin-cpu-power/battery-icon.json"
 BATTERY_LIVE_FILE = Path.home() / ".config/zorin-cpu-power/battery-live.json"
-_turbo_bar_on = False
-_turbo_bar_flip_at = 0.0
 TURBO_SETTINGS_FILE = Path.home() / ".config/zorin-cpu-power/turbo.json"
 BATTERY_ICON_MODES = (
     ("silent", "Silent", "#2DBA6E"),
@@ -973,7 +971,11 @@ class TrayPopupWindow(Gtk.Window):
 
     def _refresh_tick(self) -> bool:
         if self.get_visible():
-            self.refresh()
+            try:
+                self.refresh()
+            except Exception:
+                import traceback
+                traceback.print_exc()
         return True
 
     def _paint_charge(self) -> None:
@@ -1605,32 +1607,11 @@ def turbo_allowed_for_power_state(plugged: bool) -> bool:
     return plugged or load_turbo_settings()["on_battery"]
 
 
-def turbo_bar_display_on(override: str, live_hw: bool | None, plugged: bool) -> bool:
-    """Stable turbo % color — matches CPU page, not raw sysfs flicker in Auto."""
-    global _turbo_bar_on, _turbo_bar_flip_at
-    if not turbo_allowed_for_power_state(plugged):
-        _turbo_bar_on = False
-        _turbo_bar_flip_at = time.monotonic()
+def turbo_bar_display_on(override: str, plugged: bool) -> bool:
+    """Percent color follows the turbo setting, not each hardware boost pulse."""
+    if override not in ("auto", "always"):
         return False
-    if override == "always":
-        _turbo_bar_on = True
-        _turbo_bar_flip_at = time.monotonic()
-        return True
-    if override == "never":
-        _turbo_bar_on = False
-        _turbo_bar_flip_at = time.monotonic()
-        return False
-    if live_hw is None:
-        return _turbo_bar_on
-    now = time.monotonic()
-    if live_hw == _turbo_bar_on:
-        _turbo_bar_flip_at = now
-        return _turbo_bar_on
-    hold = 2.0 if live_hw else 0.75
-    if now - _turbo_bar_flip_at >= hold:
-        _turbo_bar_on = live_hw
-        _turbo_bar_flip_at = now
-    return _turbo_bar_on
+    return turbo_allowed_for_power_state(plugged)
 
 
 def publish_battery_live() -> None:
@@ -1648,7 +1629,7 @@ def publish_battery_live() -> None:
         pass
     turbo_enabled = bool(turbo.get("enabled", True))
     if turbo_enabled and turbo_allowed_for_power_state(plugged):
-        turbo_on = turbo_bar_display_on(override, read_turbo_live(), plugged)
+        turbo_on = turbo_bar_display_on(override, plugged)
     else:
         turbo_on = False
     payload = {
@@ -2694,6 +2675,24 @@ def read_memory_visual_stats() -> dict[str, float | bool]:
     }
 
 
+def _pretty_measure(text: str, decimals: int = 1) -> str:
+    raw = text.strip()
+    suffix = ""
+    if raw.endswith("%"):
+        suffix = "%"
+        raw = raw[:-1].strip()
+    parts = raw.split()
+    if not parts:
+        return text
+    try:
+        number = f"{float(parts[0]):.{decimals}f}"
+    except ValueError:
+        return text
+    unit = " ".join(parts[1:])
+    shown = f"{number}{suffix}"
+    return f"{shown} {unit}" if unit else shown
+
+
 def _read_file(path: str) -> str:
     try:
         return Path(path).read_text().strip()
@@ -2725,7 +2724,14 @@ def read_live() -> dict:
     try:
         import psutil
 
-        info["cpu_pct"] = float(psutil.cpu_percent(interval=None))
+        # The first non-blocking sample is always 0. Take one short sample so the
+        # dashboard does not open on a fake 0% and then freeze there.
+        if not getattr(read_live, "_cpu_primed", False):
+            psutil.cpu_percent(interval=None)
+            info["cpu_pct"] = float(psutil.cpu_percent(interval=0.2))
+            read_live._cpu_primed = True
+        else:
+            info["cpu_pct"] = float(psutil.cpu_percent(interval=None))
         info["mem_pct"] = float(psutil.virtual_memory().percent)
         info["disk_pct"] = float(psutil.disk_usage("/").percent)
         temps = psutil.sensors_temperatures()
@@ -2797,13 +2803,13 @@ def read_live() -> dict:
         info["state"] = data["state"]
         info["plugged"] = data["state"] == "charging" or "fully" in data["state"]
     if "capacity" in data:
-        info["health"] = data["capacity"].split()[0]
+        info["health"] = _pretty_measure(data["capacity"], decimals=0)
     if "charge-cycles" in data:
         info["cycles"] = data["charge-cycles"]
     if "energy-full-design" in data:
-        info["design_wh"] = data["energy-full-design"]
+        info["design_wh"] = _pretty_measure(data["energy-full-design"])
     if "energy-full" in data:
-        info["full_wh"] = data["energy-full"]
+        info["full_wh"] = _pretty_measure(data["energy-full"])
     if "energy-rate" in data:
         try:
             info["rate_w"] = float(data["energy-rate"].split()[0])
@@ -3886,7 +3892,12 @@ class ControlWindow(Gtk.Window):
         if self._tick_id:
             return
         self._adaptive_armed = False
+        self._tick_id = GLib.timeout_add(600, self._first_live_tick)
+
+    def _first_live_tick(self) -> bool:
+        self._tick()
         self._tick_id = GLib.timeout_add_seconds(2, self._tick)
+        return False
 
     def _stop_live_updates(self) -> None:
         if self._tick_id:
@@ -5114,41 +5125,42 @@ class ControlWindow(Gtk.Window):
         self._plat_ts = 0.0
 
     def _tick(self) -> bool:
-        self.live = read_live()
-        self._maybe_adaptive()
-        publish_battery_live()
-        if not self.get_visible():
-            return True
         try:
-            import psutil
+            self.live = read_live()
+            self._maybe_adaptive()
+            publish_battery_live()
+            if self.get_visible():
+                try:
+                    import psutil
 
-            counters = psutil.net_io_counters()
-            now = time.time()
-            if self._net_prev:
-                prev_b, prev_t = self._net_prev
-                delta = (counters.bytes_sent + counters.bytes_recv) - prev_b
-                dt = max(0.2, now - prev_t)
-                self.live["net_kbps"] = (delta / 1024) / dt
-            self._net_prev = (counters.bytes_sent + counters.bytes_recv, now)
+                    counters = psutil.net_io_counters()
+                    now = time.time()
+                    if self._net_prev:
+                        prev_b, prev_t = self._net_prev
+                        delta = (counters.bytes_sent + counters.bytes_recv) - prev_b
+                        dt = max(0.2, now - prev_t)
+                        self.live["net_kbps"] = (delta / 1024) / dt
+                    self._net_prev = (counters.bytes_sent + counters.bytes_recv, now)
+                except Exception:
+                    pass
+                cpu = float(self.live["cpu_pct"] or 0)
+                temp = self.live["temp"] or 0
+                watts = self.live["rate_w"] or 0
+                self.hist_cpu.append(cpu)
+                self.hist_temp.append(min(100.0, temp))
+                self.hist_watt.append(min(100.0, watts * 2))
+                self.hist_mem.append(self.live["mem_pct"])
+                self.chart.queue_draw()
+                self.mem_chart.queue_draw()
+                self._paint_live()
+                self._maybe_schedule()
         except Exception:
-            pass
-        cpu = self.live["cpu_pct"]
-        temp = self.live["temp"] or 0
-        watts = self.live["rate_w"] or 0
-        self.hist_cpu.append(cpu)
-        self.hist_temp.append(min(100.0, temp))
-        self.hist_watt.append(min(100.0, watts * 2))
-        self.hist_mem.append(self.live["mem_pct"])
-        self.gauge.set_reading(cpu, f"{cpu:.0f}%", "CPU")
-        self.chart.queue_draw()
-        self.mem_chart.queue_draw()
-        self._paint_live()
-        self._maybe_schedule()
+            import traceback
+            traceback.print_exc()
         return True
 
     def _paint_live(self) -> None:
         live = self.live
-        mode = read_samsung_mode()
         turbo_live = read_turbo_live()
         if _APPLY_LOCK.locked():
             turbo = self.turbo_choice.current
@@ -5156,12 +5168,8 @@ class ControlWindow(Gtk.Window):
             turbo = read_turbo_override()
             if self.turbo_choice.current != turbo:
                 self.turbo_choice.set_current(turbo)
-        if turbo == "auto":
-            display = turbo_bar_display_on(turbo, turbo_live, bool(live.get("plugged")))
-            self.turbo_choice.reflect_live_turbo(display)
         prof_txt = format_profile_status()
-        bar_turbo = turbo_bar_display_on(turbo, turbo_live, bool(live.get("plugged"))) if turbo == "auto" else None
-        turbo_txt = format_turbo_status(turbo, bar_turbo if bar_turbo is not None else turbo_live)
+        turbo_txt = format_turbo_status(turbo, turbo_live)
         limit = read_charge_limit()
         self.ui["dash_profile"].set_text(prof_txt)
         self.ui["dash_turbo"].set_text(turbo_txt)
@@ -5175,8 +5183,23 @@ class ControlWindow(Gtk.Window):
         self.ui["freq"].set_text(f"Frequency  {live['freq_ghz']:.2f} GHz")
         temp = f"{live['temp']:.0f} °C" if live["temp"] is not None else "—"
         self.ui["temp"].set_text(f"Temperature  {temp}")
-        rate = f"{live['rate_w']:.1f} W" if live["rate_w"] is not None else "—"
+        holding_limit = (
+            limit is not None
+            and live["percent"] is not None
+            and abs(float(live["percent"]) - limit) <= 1.5
+            and live["rate_w"] is not None
+            and live["rate_w"] < 0.05
+            and live["state"] in ("charging", "fully-charged", "pending-charge")
+        )
+        if live["rate_w"] is None:
+            rate = "—"
+        elif holding_limit:
+            rate = "0 W · holding charge limit"
+        else:
+            rate = f"{live['rate_w']:.1f} W"
         self.ui["watts"].set_text(f"System power  {rate}")
+        cpu = float(live["cpu_pct"] or 0)
+        self.gauge.set_reading(cpu, f"{cpu:.0f}%", "CPU")
         mv = read_memory_visual_stats()
         if hasattr(self, "dash_memory"):
             self.dash_memory.set_reading(
@@ -5195,6 +5218,7 @@ class ControlWindow(Gtk.Window):
         pct = f"{live['percent']:.0f}%" if live["percent"] is not None else "—"
         self.ui["batt_big"].set_text(pct)
         charging = live["state"] in ("charging", "pending-charge")
+        mode = read_samsung_mode()
         powersave = mode in ("silent", "quiet")
         fill = battery_profile_color()
         self.dash_battery.set_reading(live["percent"], charging, powersave, fill)
@@ -5219,7 +5243,8 @@ class ControlWindow(Gtk.Window):
         self.ui["cycles"].set_text(f"Cycles  {live['cycles'] or '—'}")
         self.ui["design"].set_text(f"Design capacity  {live['design_wh'] or '—'}")
         self.ui["full"].set_text(f"Full capacity  {live['full_wh'] or '—'}")
-        self.ui["time_left"].set_text(f"Time remaining  {live['time_left']}")
+        remaining = "Holding charge limit" if holding_limit else live["time_left"]
+        self.ui["time_left"].set_text(f"Time remaining  {remaining}")
         self.ui["rate"].set_text(f"Rate  {rate}")
         self.ui["batt_health_line"].set_text(f"Health {health}   ·   wear from design capacity")
         self.ui["batt_cycles_line"].set_text(f"Charge cycles  {live['cycles'] or '—'}")
@@ -5497,14 +5522,6 @@ class ControlWindow(Gtk.Window):
                 f"Active charge limit: {limit}%" if limit is not None else "Charge limit unavailable"
             )
         self._sync_preset_highlight(limit)
-        if turbo == "auto":
-            try:
-                plugged = bool(read_live().get("plugged"))
-            except Exception:
-                plugged = False
-            self.turbo_choice.reflect_live_turbo(
-                turbo_bar_display_on(turbo, read_turbo_live(), plugged)
-            )
         if hasattr(self, "turbo_on_battery_sw"):
             want = load_turbo_settings()["on_battery"]
             if self.turbo_on_battery_sw.get_active() != want:
@@ -5520,7 +5537,11 @@ class ControlWindow(Gtk.Window):
             self._sync_daemon_banner(force=False)
         else:
             self._sync_daemon_banner(force=True)
-        self._paint_live()
+        try:
+            self._paint_live()
+        except Exception:
+            import traceback
+            traceback.print_exc()
 
 
 class CompactFloatBar(Gtk.Window):

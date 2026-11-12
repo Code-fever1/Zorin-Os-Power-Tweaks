@@ -1,0 +1,8 @@
+{
+  "uuid": "lock-fingerprint-feedback@zorin.cpu-power",
+  "name": "Lock screen fingerprint",
+  "description": "Shows that a fingerprint matched and that the lock screen is logging in.",
+  "shell-version": ["45", "46", "47", "48", "49"],
+  "session-modes": ["user", "unlock-dialog"],
+  "version": 1
+}
